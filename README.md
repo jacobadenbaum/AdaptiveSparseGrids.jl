@@ -1,7 +1,8 @@
 # AdaptiveSparseGrids.jl
 
-This repository provides an implementation of Linear Interpolation via sparse adaptive grids in Julia.
-See Ma and Zabras (2009) or Brumm and Scheidegger (2017) for more details on the mathematics.
+This repository provides an implementation of Linear Interpolation via sparse
+adaptive grids in Julia.  See Ma and Zabras (2009) or Brumm and Scheidegger
+(2017) for more details on the mathematics.
 
 Basic construction/usage:
 ```julia
@@ -11,20 +12,25 @@ using AdaptiveSparseGrids
 lb  = zeros(2)
 ub  = ones(2)
 
-# True function to approximate (in practice, this function is costly to evaluate)
+# True function to approximate (in practice, this function is costly to
+evaluate)
 f(x) = 1/(sum(xv^2 for xv in x) + 0.3)
 
 
-# Construct our approximation (this will evaluate f at the needed points, using all available threads)
+# Construct our approximation (this will evaluate f at the needed points, using
+# all available threads)
 fun = AdaptiveSparseGrid(f, lb, ub,
-                         max_depth = 10,  # The maximum depth of the tree of basis elements
-                         tol = 1e-3)      # Add nodes when min(abs(alpha/f(x)), abs(alpha)) < tol
+                         max_depth = 10,    # The maximum depth of the tree of
+                                            # basis elements
+                         tol = 1e-3)        # Add nodes when min(abs(alpha/f(x)),
+                                            # abs(alpha)) < tol
 
 # Evaluating fun
 x = rand(2)
 fun(x)          # returns value of fun at x
 fun(x, 1)       # returns value of fun[1] at x (if f: R^n -> R^m with m > 1)
 
-# Check how many basis elements we used (dimension of the approximation in function space)
+# Check how many basis elements we used (dimension of the approximation in
+# function space)
 length(fun.nodes)
 ```
