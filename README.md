@@ -13,7 +13,7 @@ lb  = zeros(2)
 ub  = ones(2)
 
 # True function to approximate (in practice, this function is costly to
-evaluate)
+# evaluate)
 f(x) = 1/(sum(xv^2 for xv in x) + 0.3)
 
 
