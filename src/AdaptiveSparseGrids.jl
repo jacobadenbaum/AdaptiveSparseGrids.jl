@@ -5,6 +5,7 @@ using Parameters
 using LinearAlgebra
 
 import LinearAlgebra: norm
+import Base: show
 
 export AdaptiveSparseGrid, fit!
 
@@ -193,6 +194,14 @@ function AdaptiveSparseGrid(f::Function, lb, ub; tol = 1e-3, kwargs...)
 
     fun = AdaptiveSparseGrid(K, lb, ub; kwargs...)
     fit!(f, fun, tol = tol)
+end
+
+function Base.show(io::IO, fun::AdaptiveSparseGrid)
+    N, K = dims(fun)
+    println(io, "Sparse Adaptive Function Representation: R^$N → R^$K")
+    println(io, "    nodes: $(fun.nodes |> length)")
+    println(io, "    depth: $(fun.max_depth)")
+    println(io, "    domain: $(fun.bounds)")
 end
 
 ################################################################################
