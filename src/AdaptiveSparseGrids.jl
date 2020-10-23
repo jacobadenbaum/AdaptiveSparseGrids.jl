@@ -6,8 +6,7 @@ using LinearAlgebra
 
 import LinearAlgebra: norm
 import Base: show
-
-export AdaptiveSparseGrid, fit!
+export AdaptiveSparseGrid, AdaptiveIntegral
 
 ################################################################################
 #################### 1D Basis Function Stuff ###################################
@@ -91,12 +90,16 @@ end
 ################################################################################
 #################### Nodes #####################################################
 ################################################################################
-struct Node{D,L,K}
+KTuple{N,T} = Union{NTuple{N,T},
+                    NamedTuple{S,V} where {S, V <: NTuple{N,T}}} where {N,T}
+KTuple{N}   = KTuple{N,T} where T
+
+mutable struct Node{D,L,K,T<:KTuple{K}}
     parent::Int
     children::MMatrix{D, 2, Int, L}
-    α::MVector{K, Float64}
+    α::T
     x::SVector{D, Float64}
-    fx::MVector{K, Float64}
+    fx::T
     l::NTuple{D, Int}
     i::NTuple{D, Int}
     depth::Int
@@ -104,10 +107,14 @@ end
 
 getx(n::Node) = n.x
 
+getzero(t::T) where {T <: KTuple}                   = T(zero(tv) for tv in t)
+getzero(TT::Type{K}) where {N,T, K <: KTuple{N,T}}  = TT(zero(T) for i in 1:N)
+getzero(t::Vector)                                  = Tuple(zeros(size(t)))
+getzero(t::Number)                                  = (zero(t),)
+
 function Node(parent, children, α, l::NTuple{N,Int}, i::NTuple{N,Int}, depth) where N
     x  = SVector{N,Float64}(Y.(l, i))
-    K  = length(α)
-    fx = MVector{K,Float64}(zeros(K))
+    fx = getzero(α)
     return Node(parent, children, α, x, fx, l, i, depth)
 end
 
@@ -120,7 +127,7 @@ function leftchild(idx::Int, p::Node{D,L,K}, d) where {D, L, K}
 
     return Node(idx,
                 MMatrix{D,2,Int}(zeros(Int, D, 2)),
-                MVector{K,Float64}(zeros(Float64, K)),
+                getzero(p.α),
                 (p.l[1:d-1]..., lc, p.l[d+1:end]...),
                 (p.i[1:d-1]..., ic, p.i[d+1:end]...),
                 p.depth + 1)
@@ -135,7 +142,7 @@ function rightchild(idx::Int, p::Node{D,L,K}, d) where {D, L, K}
 
     return Node(idx,
                 MMatrix{D,2,Int}(zeros(Int, D, 2)),
-                MVector{K,Float64}(zeros(Float64, K)),
+                getzero(p.α),
                 (p.l[1:d-1]..., lc, p.l[d+1:end]...),
                 (p.i[1:d-1]..., ic, p.i[d+1:end]...),
                 p.depth + 1)
@@ -160,21 +167,29 @@ end
 #################### Function Representation ###################################
 ################################################################################
 
-mutable struct AdaptiveSparseGrid{N, K, L} <: Function
-    nodes::Vector{Node{N, L, K}}
+mutable struct AdaptiveSparseGrid{N, K, L, T} <: Function
+    nodes::Vector{Node{N, L, K, T}}
     bounds::SMatrix{N, 2, Float64, L}
     depth::Int
     max_depth::Int
 end
 
-function AdaptiveSparseGrid(K, lb, ub; max_depth = 10)
-    N = length(lb)
+getT(::AdaptiveSparseGrid{N,K,L,T}) where {N,K,L,T} = T
+
+dims(fun::AdaptiveSparseGrid{N,K,L,T}) where {N,K,L,T} = (N, K)
+dims(fun, i) = dims(fun)[i]
+
+function AdaptiveSparseGrid(f::Function, lb, ub; tol = 1e-3, max_depth = 10)
+    N  = length(lb)
     @assert N == length(ub)
+
+    # Evaluate the function once to get the output dimensions/types
+    fx = f((lb .+ ub)./2)
 
     # Make the initial node
     head = Node(0,
                 MMatrix{N, 2}(zeros(Int, N,2)),
-                MVector{K}(zeros(K)),
+                getzero(fx),
                 Tuple(1 for i in 1:N),
                 Tuple(1 for i in 1:N),
                 1)
@@ -183,17 +198,11 @@ function AdaptiveSparseGrid(K, lb, ub; max_depth = 10)
     # Bounds
     bounds = SMatrix{N, 2}(hcat(lb, ub))
 
-    return AdaptiveSparseGrid(nodes, bounds, 1, max_depth)
-end
-
-function AdaptiveSparseGrid(f::Function, lb, ub; tol = 1e-3, kwargs...)
-    N  = length(lb)
-    @assert N == length(ub)
-    fx = f((lb .+ ub)./2)
-    K  = length(fx)
-
-    fun = AdaptiveSparseGrid(K, lb, ub; kwargs...)
+    # Construct the approximation, and then fit it
+    fun = AdaptiveSparseGrid(nodes, bounds, 1, max_depth)
     fit!(f, fun, tol = tol)
+
+    return fun
 end
 
 function Base.show(io::IO, fun::AdaptiveSparseGrid)
@@ -208,11 +217,44 @@ end
 #################### Evaluating the Interpolant ################################
 ################################################################################
 
-function (fun::AdaptiveSparseGrid)(x)
-    return evaluate(fun, scale(fun, x))
+@generated function takeT(::Type{T}, x) where {N, T <: KTuple{N}}
+    ex = Expr(:tuple, Tuple( :(x[$i]) for i in 1:N)...)
+    return quote
+        T($ex)
+    end
 end
 
-function (fun::AdaptiveSparseGrid)(x, k)
+function (fun::AdaptiveSparseGrid{N,1,L,T})(x) where {N,L,T}
+    return evaluate(fun, scale(fun, x), 1)
+end
+
+function (fun::AdaptiveSparseGrid{N,1,L,T})(x...) where {N,L,T}
+    return evaluate(fun, scale(fun, x), 1)
+end
+
+function (fun::AdaptiveSparseGrid{N,1,L,T})(x, s::Symbol) where {N,L,T}
+    return evaluate(fun, scale(fun, x), s)
+end
+
+function (fun::AdaptiveSparseGrid{N,1,L,T})(x, s::Int) where {N,L,T}
+    return evaluate(fun, scale(fun, x), s)
+end
+
+function (fun::AdaptiveSparseGrid)(x)
+    return takeT(getT(fun), evaluate(fun, scale(fun, x)))
+end
+
+function (fun::AdaptiveSparseGrid)(x, k::Int)
+    return evaluate(fun, scale(fun, x), k)
+end
+
+getkeys(::Type{NamedTuple{K,T}}) where {K,T} = K
+
+function (fun::AdaptiveSparseGrid)(x, s::Symbol)
+    T = getT(fun)
+    T <: NamedTuple || throw(KeyError(s))
+
+    k = findfirst(isequal(s), getkeys(getT(fun)))
     return evaluate(fun, scale(fun, x), k)
 end
 
@@ -234,10 +276,12 @@ function scale(fun::AdaptiveSparseGrid, x)
     return (x .- bounds[:,1]) ./ (bounds[:,2] .- bounds[:,1])
 end
 
-dims(fun::AdaptiveSparseGrid{N,K,L}) where {N,K,L} = (N, K)
-dims(fun, i) = dims(fun)[i]
+function evaluate(fun::AdaptiveSparseGrid, x)
+    K = dims(fun, 2)
+    y = MVector{K}(zeros(K))
+    evaluate!(y, fun, x)
+end
 
-evaluate(fun::AdaptiveSparseGrid, x)            = evaluate!(zeros(dims(fun, 2)), fun, x)
 evaluate(fun::AdaptiveSparseGrid, x, k)         = evaluate_recursive!(makework(fun,x),    fun, 1, 1, x, k)
 evaluate!(y, fun::AdaptiveSparseGrid, x)        = evaluate_recursive!(y, makework(fun,x), fun, 1, 1, x)
 evaluate!(y, wrk, fun::AdaptiveSparseGrid, x)   = evaluate_recursive!(y, wrk, fun, 1, 1, x)
@@ -268,7 +312,9 @@ function evaluate_recursive!(y, wrk, fun::AdaptiveSparseGrid, idx::Int, dimshift
     end
 
     # Add in the the contribution of this node to the running sum
-    y  .+= u .* node.α
+    @inbounds @simd for k in 1:K
+        y[k] += u * node.α[k]
+    end
 
     # If the contribution of this node is nonzero (i.e, x lies in the support of
     # this basis function), then we continue checking all of it's children
@@ -301,6 +347,9 @@ function childsplit(n::Node, x, d; inclusive=false)
     end
 end
 
+get(x::KTuple, i::Int)      = x[i]
+get(x::KTuple, s::Symbol)   = getproperty(x, s)
+
 function evaluate_recursive!(wrk, fun::AdaptiveSparseGrid, idx::Int, dimshift, x, k)
     # Dimensions of domain/codomain
     N, K = dims(fun)
@@ -321,7 +370,7 @@ function evaluate_recursive!(wrk, fun::AdaptiveSparseGrid, idx::Int, dimshift, x
     end
 
     # Add in the the contribution of this node to the running sum
-    y = u * node.α[k]
+    y = u * get(node.α, k)
 
     # If the contribution of this node is nonzero (i.e, x lies in the support of
     # this basis function), then we continue checking all of it's children
@@ -358,7 +407,9 @@ function fit!(f, fun::AdaptiveSparseGrid; kwargs...)
     return fun
 end
 
-err(node::Node) = norm(min.(abs.(node.α), abs.(node.α ./ node.fx)), Inf)
+err(node::Node,d=:) = norm(err.(Tuple(node.α)[d], Tuple(node.fx)[d]), Inf)
+err(a, f) = abs(a) / max(abs(f), 1)
+
 # err(node::Node) = norm(node.α, Inf)
 
 """
@@ -369,9 +420,6 @@ Proceeds in 4 steps
     4) Insert the points into the grid
 """
 function refinegrid!(f, fun::AdaptiveSparseGrid; kwargs...)
-    # Dimensions of function (Domain -> Codomain)
-    N, K = dims(fun)
-
     # Get the list of possible child nodes
     children = procreate!(fun; kwargs...)
 
@@ -383,7 +431,7 @@ function refinegrid!(f, fun::AdaptiveSparseGrid; kwargs...)
     train!(f, fun, children)
 
     # Insert the new children into the main function
-    drive_to_college!(fun, children)
+    drive_to_college!(fun, children; kwargs...)
 
     # Increment the depth counter
     fun.depth += 1
@@ -405,7 +453,7 @@ function procreate!(fun; tol = 1e-3)
             #
             # Note: We insist on refining up to at least the 3rd layer to make
             # sure that we don't stop prematurely
-            err(node) < tol && node.depth > 2 && continue
+            node.depth > 5 && err(node) < tol && continue
 
             # Add in the children -- this should be a separate function
             for d in 1:N
@@ -417,16 +465,16 @@ function procreate!(fun; tol = 1e-3)
     return children
 end
 
-function train!(f, fun::AdaptiveSparseGrid, children)
+function train!(f, fun::AdaptiveSparseGrid{N,K,L,T}, children) where {N,K,L,T}
     # Evaluate the function and compute the gain for each of the children
     # Note: This should be done in parallel, since this is where all of the hard
     # work (computing function evaluations) happens
     @sync for child in children
         Threads.@spawn begin
             x           = getx(child)
-            child.fx   .= f(rescale(fun, x))
+            child.fx    = T(f(rescale(fun, x)))
             ux          = evaluate(fun, x)
-            child.α    .= child.fx .- ux
+            child.α     = T(Tuple(child.fx) .- ux)
         end
     end
     return
@@ -436,8 +484,9 @@ end
 This function inserts the children into the list of nodes, and sets up the
 parent/child linkages that allow the child to be used in function evaluations
 """
-function drive_to_college!(fun, children)
+function drive_to_college!(fun, children; tol=1e-3)
     for child in children
+
         push!(fun.nodes, child)
 
         # Update its parent (so that we can find it later)
@@ -482,85 +531,219 @@ function whichchild(parent, child)
 end
 
 ################################################################################
-#################### Gradients #################################################
+#################### Integration ###############################################
 ################################################################################
-#
-# function ∇(fun::AdaptiveSparseGrid, x, k)::Vector{Float64}
-#     N, K = dims(fun)
-#     J    = zeros(N)
-#     wrk  = zeros(N)
-#
-#     return recursive_jacobian!(J, wrk, fun, 1, x, k)
-# end
-#
-# function recursive_jacobian!(J, u, fun::AdaptiveSparseGrid, idx::Int, x, k)
-#     # Dimensions of domain/codomain
-#     N, K = dims(fun)
-#
-#     # Get the node that we're working on now
-#     node = fun.nodes[idx]
-#
-#     # Evaluate x against this node's basis function
-#     for d in 1:N
-#         u[d] = ϕ(node.l[d], node.i[d], x[d])
-#     end
-#     uu = prod(u)
-#
-#     if uu > 0
-#         # Add in this node's contribution to the jacobian
-#         for d in 1:N
-#             if uu > 0
-#                 # Most of the time, we can do this the fast way
-#                 dϕdx = uu/u[d] * Dϕ(node.l[d],node.i[d], x[d])
-#             else
-#                 # Handle the special case with uu == 0
-#                 # Technically, the derivative isn't defined here.  But we're
-#                 # going to construct things using the "right side" derivative,
-#                 # since otherwise the gradient looks really weird at the node
-#                 # points
-#                 # dϕdx = prod(1:N) do k
-#                 #     k != d && u[k]
-#                 #     k == d && Dϕ(node.l[d], node.i[d], x[d])
-#                 # end
-#                 dϕdx = 0.0
-#             end
-#             J[d] += dϕdx * node.α[k]
-#         end
-#     end
-#
-#     # If the contribution of this node is nonzero (i.e, x lies in the support of
-#     # this basis function), then we continue checking all of it's children
-#     for d in 1:N
-#         kd = childsplit(node, x, d, inclusive=true)
-#         kd == 0 && continue
-#
-#         child = node.children[d,kd]
-#         if child  > 0
-#             recursive_jacobian!(J, u, fun, child, x, k)
-#         end
-#     end
-#
-#     return J
-# end
 
+struct AdaptiveIntegral{T<:AdaptiveSparseGrid}
+    fun::T
+    dims::Set{Int}
+    idims::Vector{Int}
+end
+
+function AdaptiveIntegral(fun::AdaptiveSparseGrid, dd)
+    # Check the dimensions
+    N   = dims(fun,1)
+    all(d -> d <= N, dd) || begin
+        msg = "Invalid integration dimensions $dims with $(N)D integrand"
+        throw(ArgumentError(msg))
+    end
+
+    sdims = Set(dd)
+    idims = setdiff(1:N, sdims)
+
+    # Let's make sure the dimensions are unique and sorted
+    return AdaptiveIntegral(fun, sdims, idims)
+end
+
+
+function AdaptiveIntegral(f::Function, lb, ub, dd; kwargs...)
+    fun = AdaptiveSparseGrid(f, lb, ub; kwargs...)
+    return AdaptiveIntegral(fun, dd)
+end
+
+function (int::AdaptiveIntegral)(x)
+    # Compute the integral
+    v  = integrate(int, scale(int, intx(int, x)))
+    bd = int.fun.bounds
+
+    # Compute Scaling Factor
+    s = 1.0
+    for d in int.dims
+        s *= (bd[d,2] - bd[d,1])
+    end
+
+    return v * s
+end
+
+(int::AdaptiveIntegral)(x, k) = int(x)[k]
+
+function (int::AdaptiveIntegral)()
+    if dims(int.fun, 1) == length(int.dims)
+        return int(Float64[])
+    else
+        throw(ArgumentError("You must specify a point to evaluate the integral at"))
+    end
+end
+
+function intx(int::AdaptiveIntegral, x)
+    N  = dims(int.fun, 1)
+    T  = promote_type(eltype(x), Float64)
+    xx = zeros(T, N)
+
+    i = 0
+    for d in 1:N
+        in(d, int.dims) && continue
+        i += 1
+        xx[d] = x[i]
+    end
+    return xx
+end
+
+function integrate(int::AdaptiveIntegral, x)
+    T    = promote_type(eltype(x), Float64)
+    y    = zeros(T, dims(int.fun, 2))
+    wrk  = makework(int.fun, x)
+    return integrate_recursive!(y, wrk, int, 1, 1, x)
+end
+
+function scale(int::AdaptiveIntegral, x)
+    N, K            = dims(int.fun)
+    @unpack bounds  = int.fun
+
+    for d in int.idims
+        bounds[d,1] <= x[d] <= bounds[d,2] || throw(ArgumentError("$x is out of bounds"))
+    end
+
+    return (x .- bounds[:,1]) ./ (bounds[:,2] .- bounds[:,1])
+end
+
+
+function integrate_recursive!(y, wrk, int::AdaptiveIntegral, idx::Int, dimshift, x)
+    # Dimensions of domain/codomain
+    fun  = int.fun
+    N, K = dims(fun)
+
+    # Get the node that we're working on now
+    @inbounds node  = fun.nodes[idx]
+    @inbounds depth = node.depth
+
+    # We have stored the basis function evaluations for every dimension except
+    # dimshift -- move that dimension to the end (for storage, so we can put it
+    # back later)
+    wrk[N+depth]    = wrk[dimshift]
+    wrk[dimshift]   = in(dimshift, int.dims) ?
+                        I(node,dimshift)     :
+                        ϕ(node, x, dimshift)
+    # Compute the product across all the dimensions
+    u = prod(1:N) do d
+        @inbounds wrk[d]
+    end
+
+    # Add in the the contribution of this node to the running sum
+    @inbounds @simd for k in 1:K
+        y[k] += u * node.α[k]
+    end
+
+    # If the contribution of this node is nonzero (i.e, x lies in the support of
+    # this basis function), then we continue checking all of it's children
+    if u > 0
+        for d in 1:N
+            # Are we considering in an integration dimension
+            dd = in(d, int.dims)
+
+            # If not, we can compute which side to split along
+            if !dd
+                kd = childsplit(node, x, d)
+                kd == 0 && continue
+            end
+
+            # Along the integration dimension, we will always follow all the
+            # splits. But in a non-integration dimension, we can just follow the
+            # binary search tree
+            for split in 1:2
+                !dd && kd != split && continue
+
+                child = node.children[d, split]
+                if child  > 0
+                    integrate_recursive!(y, wrk, int, child, d, x)
+                end
+            end
+        end
+    end
+
+    # We have to clean up the work buffer now (we want all entries with index <
+    # N + depth put back the way we found them)
+    @inbounds wrk[dimshift] = wrk[N + depth]
+
+    return y
+end
+
+function I(l)
+    l >  2 && return 1/(2 << (l-2))
+    l == 2 && return 1/4
+    l == 1 && return 1.0
+end
+
+I(n::Node, d) = I(n.l[d])
 ################################################################################
 ##################### Helper Utilities #########################################
 ################################################################################
 
-function norm(f1::T, f2::T, args...) where {T <: AdaptiveSparseGrid}
+function norm(f1::T, f2::T, p=Inf; dim = :) where {T <: AdaptiveSparseGrid}
     # Get the set of evaluation points (union of both functions)
-    Xs = vcat(rescale.(Ref(f1), getx.(f1.nodes)),
-              rescale.(Ref(f2), getx.(f2.nodes))) |> unique
+    Xs = vcat(rescale.(f1, getx.(f1.nodes)),
+              rescale.(f2, getx.(f2.nodes))) |> sort! |> unique!
 
-    return norm( (diff(f1, f2, x) for x in Xs), args...)
+    chx = Channel{eltype(Xs)}(Threads.nthreads()) do c
+        for x in Xs
+            put!(c,x)
+        end
+    end
+
+    # Split up the work among the threads
+    accum = zeros(Threads.nthreads())
+    @sync for thread in 1:Threads.nthreads()
+        Threads.@spawn begin
+            id = Threads.threadid()
+            for x in chx
+                d = diff(f1, f2, x, dim)
+                if isinf(p)
+                    accum[id] = max(accum[id], reduce(max, d))
+                else
+                    accum[id] += mapreduce(x->x^p, +, d)
+                end
+            end
+        end
+    end
+
+    # Accumulate the results from each thread, and raise to the power of 1/p (or
+    # take the max if it's the Inf norm)
+    if isinf(p)
+        return reduce(max, accum)
+    else
+        return reduce(+, accum)^(1/p)
+    end
 end
 
-function diff(f1, f2, x)
-    f1v = f1(x)
-    f2v = f2(x)
-    return min.(abs.(f1v.-f2v),                           # Absolute Error
-                abs.(f1v.-f2v)./max.(abs.(f1v),abs.(f2v)) # Relative Error
-               )
+function diff(f1, f2, x, dim=:)
+    f1v = f1(x) |> Tuple
+    f2v = f2(x) |> Tuple
+
+    return rel_err.(f1v[dim], f2v[dim])
 end
+
+rel_err(v1,v2) = abs(v1 - v2)/max(min(abs(v1), abs(v2)), 1.0)
+
+function getx(fun::AdaptiveSparseGrid)
+    return rescale.(fun, getx.(fun.nodes))
+end
+
+getα(fun::AdaptiveSparseGrid)  = [n.α  for n in fun.nodes]
+getf(fun::AdaptiveSparseGrid)  = [n.fx for n in fun.nodes]
+nodes(fun::AdaptiveSparseGrid) = fun.nodes
+
+Base.length(fun::AdaptiveSparseGrid) = length(fun.nodes)
+
+export getx, getα, getf, nodes
 
 end
