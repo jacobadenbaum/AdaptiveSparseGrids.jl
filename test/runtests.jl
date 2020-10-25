@@ -69,7 +69,7 @@ using QuadGK
         @test ϕ(0.25) == 0.75
         @test ϕ(0.75) == 0.25
 
-        for x in LinRange(0, 1, 100)
+        for x in LinRange(0, 1, 5)
             # Test Symmetry
             @test ϕ(x) == ϕ(-x)
 
@@ -92,7 +92,7 @@ using QuadGK
     end
 
     @testset "Dϕ: Derivatives" begin
-        for x in LinRange(-1, 1, 101)
+        for x in LinRange(-1, 1, 5)
             @test Dϕ(x) == ForwardDiff.derivative(ϕ, x)
         end
     end
@@ -217,11 +217,7 @@ end
 
     @testset "Node 1D" begin
         import AdaptiveSparseGrids: Node, getx, ϕ
-        node(l, i) = Node(0,
-                          @MMatrix(zeros(Int, 1,2)),
-                          (a = 0.0, b = 0.0),
-                          (l,), (i,), 1)
-        n = node(1,1)
+        n = Node(1,1)
         @test ϕ(n, (0.0,), 1) == 1.0
         @test ϕ(n, (0.5,), 1) == 1.0
         @test ϕ(n, (1.0,), 1) == 1.0
@@ -242,7 +238,7 @@ end
         @test ϕ(rc, 0.75, 1) == 0.5
 
         for l in 3:10, j in 1:2:m(l)
-            n = node(l, j)
+            n = Node(l, j)
             @test getx(n) == @SVector [Y(l, j)]
             @test ϕ(n, getx(n), 1) == 1.0
             @test ϕ(n, Y(leftchild(l,j)...), 1)  == 0.5
@@ -256,13 +252,8 @@ end
 
     @testset "Node 2D" begin
         import AdaptiveSparseGrids: Node, getx, ϕ
-        node(l, i) = Node(0,
-                          @MMatrix(zeros(Int, 2 ,2)),
-                          (a = 0.0, b = 0.0),
-                          l, i, 1)
-
         for l1 in 3:5, l2 in 3:5, i1 in 1:2:m(l1), i2 in 1:2:m(l2)
-            n = node((l1,l2), (i1, i2))
+            n = Node((l1,l2), (i1, i2))
 
             # Check that we're linearly interpolating to the corners
             for d1 in -1:1, d2 in -1:1
@@ -365,6 +356,9 @@ end
         @test f((x,2)) == f(x, 2.0)
         @test f((2,x)) == f(2.0, x)
     end
+
+    # Check that the max depth parameter works
+    @test mapreduce(x -> x.depth, max, nodes(f)) <= f.max_depth
 
     # Now a version from R^2 →  R^2
     h((x,y)) = (a = sin(x) * cos(y), b = x^2 + y^2)

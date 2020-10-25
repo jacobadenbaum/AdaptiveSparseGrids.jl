@@ -106,18 +106,38 @@ mutable struct Node{D,L,K,T<:KTuple{K}}
     depth::Int
 end
 
+function Node(T::Type{S}, l, i) where {S <: KTuple}
+    lt = Tuple(l)
+    it = Tuple(i)
+    N  = length(lt)
+
+    return Node(0,
+                MMatrix{N, 2}(zeros(Int, N,2)),
+                getzero(T),
+                SVector{N}(Y.(lt,it)),
+                getzero(T),
+                lt, it, sum(l) - N + 1)
+end
+
+function Node(parent, children, α, l::NTuple{N,Int}, i::NTuple{N,Int}, depth) where N
+    x  = SVector{N,Float64}(Y.(l, i))
+    fx = getzero(α)
+    n  = Node(typeof(α), l,i)
+    n.parent = parent
+    n.α      = α
+    n.fx     = fx
+    return n
+end
+
+Node(T::KTuple, l, i) = Node(typeof(T), l, i)
+Node(l, i)            = Node(Tuple{Float64}, l, i)
+
 getx(n::Node) = n.x
 
 getzero(t::T) where {T <: KTuple}                   = T(zero(tv) for tv in t)
 getzero(TT::Type{K}) where {N,T, K <: KTuple{N,T}}  = TT(zero(T) for i in 1:N)
 getzero(t::Vector)                                  = Tuple(zeros(size(t)))
 getzero(t::Number)                                  = (zero(t),)
-
-function Node(parent, children, α, l::NTuple{N,Int}, i::NTuple{N,Int}, depth) where N
-    x  = SVector{N,Float64}(Y.(l, i))
-    fx = getzero(α)
-    return Node(parent, children, α, x, fx, l, i, depth)
-end
 
 function leftchild(idx::Int, p::Node{D,L,K}, d) where {D, L, K}
     # Compute child along the dth dimension
