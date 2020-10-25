@@ -1,5 +1,10 @@
 # AdaptiveSparseGrids.jl
 
+[![Stable](https://img.shields.io/badge/docs-stable-blue.svg)](https://jacobadenbaum.github.io/AdaptiveSparseGrids.jl/stable)
+[![Dev](https://img.shields.io/badge/docs-dev-blue.svg)](https://jacobadenbaum.github.io/AdaptiveSparseGrids.jl/dev)
+[![Build Status](https://github.com/jacobadenbaum/AdaptiveSparseGrids.jl/workflows/CI/badge.svg)](https://github.com/jacobadenbaum/AdaptiveSparseGrids.jl/actions)
+[![Coverage](https://codecov.io/gh/jacobadenbaum/AdaptiveSparseGrids.jl/branch/master/graph/badge.svg)](https://codecov.io/gh/jacobadenbaum/AdaptiveSparseGrids.jl)
+
 This repository provides an implementation of Linear Interpolation via sparse
 adaptive grids in Julia.  See Ma and Zabras (2009) or Brumm and Scheidegger
 (2017) for more details on the mathematics.
