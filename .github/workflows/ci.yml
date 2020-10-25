@@ -58,7 +58,7 @@ jobs:
           julia --project=docs -e '
             using Documenter: doctest
             using AdaptiveSparseGrids 
-            doctest(AdapiveSparseGrids)'
+            doctest(AdaptiveSparseGrids)'
       - run: julia --project=docs docs/make.jl
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
