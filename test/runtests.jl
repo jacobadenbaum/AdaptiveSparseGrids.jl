@@ -216,21 +216,21 @@ end
     end
 
     @testset "Node 1D" begin
-        import AdaptiveSparseGrids: Node, getx, ϕ
+        import AdaptiveSparseGrids: Node, getx, ϕ, makeleftchild, makerightchild
         n = Node(1,1)
         @test ϕ(n, (0.0,), 1) == 1.0
         @test ϕ(n, (0.5,), 1) == 1.0
         @test ϕ(n, (1.0,), 1) == 1.0
 
         # Check the children
-        lc = leftchild(1, n, 1)
+        lc = makeleftchild(n, 1)
         @test getx(lc) == @SVector [0.0]
         @test ϕ(lc, 0.0, 1) == 1.0
         @test ϕ(lc, 0, 1)   == 1.0
         @test ϕ(lc, 0.5, 1) == 0.0
         @test ϕ(lc, 0.25, 1) == 0.5
 
-        rc = rightchild(1, n, 1)
+        rc = makerightchild(n, 1)
         @test getx(rc) == @SVector [1.0]
         @test ϕ(rc, 1.0, 1) == 1.0
         @test ϕ(rc, 1, 1)   == 1.0
@@ -251,7 +251,7 @@ end
     end
 
     @testset "Node 2D" begin
-        import AdaptiveSparseGrids: Node, getx, ϕ
+        import AdaptiveSparseGrids: Node, getx, ϕ, m, Y
         for l1 in 3:5, l2 in 3:5, i1 in 1:2:m(l1), i2 in 1:2:m(l2)
             n = Node((l1,l2), (i1, i2))
 
@@ -342,7 +342,7 @@ end
     h(x...)  = h(x)
 
     f = AdaptiveSparseGrid(h, [0.0, 0.0], [2 * pi, 2 * pi],
-                           tol=1e-6, max_depth = 20)
+                           tol=1e-6, max_depth = 20, train=false)
 
     for x in LinRange(0,2*pi,100), y in LinRange(0,2*pi,100)
         @test f((x,y)) ≈ h(x,y) atol = 1e-6
@@ -358,7 +358,7 @@ end
     end
 
     # Check that the max depth parameter works
-    @test mapreduce(x -> x.depth, max, nodes(f)) <= f.max_depth
+    @test mapreduce(x -> x.depth, max, values(nodes(f))) <= f.max_depth
 
     # Now a version from R^2 →  R^2
     h((x,y)) = (a = sin(x) * cos(y), b = x^2 + y^2)
