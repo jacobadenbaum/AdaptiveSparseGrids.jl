@@ -23,40 +23,41 @@ function Y(i::Int,j::Int)
     mi = m(i)
 
     # Let's check the indices -- j must be less than m(i)
-    if !( j <= mi )
-        msg = "j must be less than m(i).  You passed j=$j, which is larger than m($i) = $mi"
+    if !( 0 <= j <= mi )
+        msg = """
+        j must be in {0, 1, ...,  m(i)}.  You passed j=$j
+        """
         throw(ArgumentError(msg))
     end
 
     # Return the indices
-    mi > 2  && return j/(mi)
+    mi > 1  && return j/(mi)
     mi == 1 && return 0.5
-    mi == 2 && j == 0   && return 0.0
-    mi == 2 && j == 2   && return 1.0
 
     throw(ArgumentError("j must be positive.  You passed j=$j"))
 end
 
 h(i) = 1/m(i)
 
-function ϕ(x)
+function ϕ(x::Real)
     -1 <= x <= 1 && return 1 - abs(x)
-    return 0.0
+    return zero(x)
 end
 
-function Dϕ(x)
+function Dϕ(x::Real)
     0  <= x <= 1 && return -1
     -1 <= x <  0 && return 1
-    return 0
+    return zero(x)
 end
 
 
 function ϕ(i,j,x)
     i > 2               && return ϕ(x*m(i) - j)
-    i == 2 && j == 0    && return 0 <= x <= 0.5 ?  1 - 2 * x : 0.0
-    i == 2 && j == 2    && return 0.5 <= x <= 1 ?  2 * x - 1 : 0.0
-    i == 1              && return 1.0
-    throw(error("i=$i, j=$j are not valid indices"))
+    i == 2 && j == 0    && return 0.0 <= x <= 0.5 ?  1 - 2 * x : 0.0
+    i == 2 && j == 2    && return 0.5 <= x <= 1   ?  2 * x - 1 : 0.0
+    i == 2 && j == 1    && return ϕ(2*x - 1)
+    i == 1              && return 0.0 <= x <= 1   ? 1.0 : 0.0
+    throw(ArgumentError("i=$i, j=$j are not valid indices"))
 end
 
 ϕ(i::Int, j::Int) = x -> ϕ(i,j,x)
@@ -66,24 +67,24 @@ function Dϕ(i,j,x)
     i > 2               && return (mi = m(i); Dϕ(x*mi - j) * mi)
     i == 2 && j == 0    && return 0 <= x <= 0.5 ?  - 2.0  : 0.0
     i == 2 && j == 2    && return 0.5 <= x <= 1 ?    2.0  : 0.0
-    throw(error("i=$i, j=$j are not valid indices"))
+    throw(ArgumentError("i=$i, j=$j are not valid indices"))
 end
 
 
-function leftchild(i,j)
+function leftchild(i::Int,j::Int)
     i > 2               && return (i+1, 2j - 1)
     i == 2 && j == 0    && return (i+1, -1)
     i == 2 && j == 2    && return (i+1, 3)
     i == 1              && return (i+1, 0)
-    throw(error("i=$i, j=$j are not valid indices"))
+    throw(ArgumentError("i=$i, j=$j are not valid indices"))
 end
 
-function rightchild(i,j)
+function rightchild(i::Int,j::Int)
     i > 2               && return (i+1, 2j + 1)
     i == 2  && j == 0   && return (i+1, 1)
     i == 2  && j == 2   && return (i+1, -1)
     i == 1              && return (i+1, 2)
-    throw(error("i=$i, j=$j are not valid indices"))
+    throw(ArgumentError("i=$i, j=$j are not valid indices"))
 end
 
 
@@ -261,7 +262,7 @@ end
 function rescale(fun::AdaptiveSparseGrid, x)
     N, K            = dims(fun)
     @unpack bounds  = fun
-    return bounds[:, 1] .+ x .* (bounds[:,2] - bounds[:,1])
+    return bounds[:, 1] .+ SVector{N}(x) .* (bounds[:,2] - bounds[:,1])
 end
 
 function scale(fun::AdaptiveSparseGrid, x)
@@ -273,7 +274,7 @@ function scale(fun::AdaptiveSparseGrid, x)
         bounds[d,1] <= x[d] <= bounds[d,2] || throw(ArgumentError("$x is out of bounds"))
     end
 
-    return (x .- bounds[:,1]) ./ (bounds[:,2] .- bounds[:,1])
+    return (SVector{N}(x) .- bounds[:,1]) ./ (bounds[:,2] .- bounds[:,1])
 end
 
 function evaluate(fun::AdaptiveSparseGrid, x)
