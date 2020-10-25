@@ -1,3 +1,3 @@
 [deps]
-Documenter = "e30172f5-a6a5-5a46-863b-614d45cd2de4"
 AdaptiveSparseGrids = "676d8d29-539e-4f06-b848-7dd647dd5291"
+Documenter = "e30172f5-a6a5-5a46-863b-614d45cd2de4"
