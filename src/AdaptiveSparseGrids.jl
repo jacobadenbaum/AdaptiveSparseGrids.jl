@@ -328,7 +328,7 @@ end
 
 function base(fun::AdaptiveSparseGrid)
     N = dims(fun, 1)
-    return Tuple(1 for i in 1:N), Tuple(1 for i in 1:N)
+    return NTuple{N}(1 for i in 1:N), NTuple{N}(1 for i in 1:N)
 end
 
 function evaluate(fun::AdaptiveSparseGrid, x)
@@ -342,7 +342,7 @@ evaluate!(y, fun::AdaptiveSparseGrid, x)        = evaluate_recursive!(y, makewor
 evaluate!(y, wrk, fun::AdaptiveSparseGrid, x)   = evaluate_recursive!(y, wrk, fun, base(fun), 1, x)
 
 function makework(fun, x)
-    L = dims(fun,1) + fun.max_depth + 1
+    L = dims(fun,1) + fun.depth + 1
     T = promote_type(Float64, eltype(x))
     return ones(T, L)
 end
@@ -352,8 +352,8 @@ function evaluate_recursive!(y, wrk, fun::AdaptiveSparseGrid, idx::Index, dimshi
     N, K = dims(fun)
 
     # Get the node that we're working on now
-    @inbounds node  = fun.nodes[idx]
-    @inbounds depth = node.depth
+    node  = fun.nodes[idx]
+    depth = node.depth
 
     # We have stored the basis function evaluations for every dimension except
     # dimshift -- move that dimension to the end (for storage, so we can put it
@@ -426,7 +426,7 @@ function evaluate_recursive!(wrk, fun::AdaptiveSparseGrid, idx::Index, dimshift,
     N, K = dims(fun)
 
     # Get the node that we're working on now
-    node = @inbounds fun.nodes[idx]
+    node  = fun.nodes[idx]
     depth = node.depth
 
     # We have stored the basis function evaluations for every dimension except
@@ -489,8 +489,9 @@ function fit!(f, fun::AdaptiveSparseGrid; kwargs...)
     # We need to evaluate f on the base node
     train!(f, fun, values(fun.nodes))
 
-    while fun.depth < fun.max_depth
-        refinegrid!(f, fun; kwargs...)
+    while true
+        n = refinegrid!(f, fun; kwargs...)
+        n == 0 && break
     end
     return fun
 end
@@ -515,6 +516,7 @@ function refinegrid!(f, fun::AdaptiveSparseGrid; kwargs...)
 
     # Increment the depth counter
     fun.depth += 1
+    return length(children)
 end
 
 function raise_children!(f, fun::AdaptiveSparseGrid, children)
@@ -539,6 +541,8 @@ end
 id(n::Node)    = (n.l..., n.i...)
 index(n::Node) = (n.l, n.i)
 
+
+depth(idx::Index{N}) where N = sum(idx[1]) + 1 - N
 function procreate!(fun; tol = 1e-3)
     # Dimensions of function (Domain -> Codomain)
     N, K = dims(fun)
@@ -553,10 +557,14 @@ function procreate!(fun; tol = 1e-3)
             #
             # Note: We insist on refining up to at least the 3rd layer to make
             # sure that we don't stop prematurely
-            node.depth > 5 && err(node) < tol && continue
+            node.depth > 6 && err(node) < tol   && continue
+
 
             # Add in the children -- this should be a separate function
             for d in 1:N
+                # We also have a width criteria -- we won't continue adding nodes
+                # past a certain level of refinement in each dimension
+                node.l[d] >= fun.max_depth      && continue
                 addchildren!(children, node, d)
             end
         end
@@ -595,7 +603,6 @@ function find_parents!(fun::AdaptiveSparseGrid, parents, child)
     end
 end
 
-depth(idx::Index{N}) where N = sum(idx[1]) + 1 - N
 
 function hasparents(fun::AdaptiveSparseGrid, idx::Index)
     # Base case
@@ -854,8 +861,8 @@ I(n::Node, d) = I(n.l[d])
 
 function norm(f1::T, f2::T, p=Inf; dim = :) where {T <: AdaptiveSparseGrid}
     # Get the set of evaluation points (union of both functions)
-    Xs = vcat(rescale.(f1, getx.(f1.nodes)),
-              rescale.(f2, getx.(f2.nodes))) |> sort! |> unique!
+    Xs = vcat(rescale.(f1, getx.(values(f1.nodes))),
+              rescale.(f2, getx.(values(f2.nodes)))) |> sort! |> unique!
 
     chx = Channel{eltype(Xs)}(Threads.nthreads()) do c
         for x in Xs
@@ -898,7 +905,7 @@ end
 rel_err(v1,v2) = abs(v1 - v2)/max(min(abs(v1), abs(v2)), 1.0)
 
 function getx(fun::AdaptiveSparseGrid)
-    return rescale.(fun, getx.(fun.nodes))
+    return rescale.(fun, getx.(values(fun.nodes)))
 end
 
 getα(fun::AdaptiveSparseGrid)  = [n.α  for n in fun.nodes]

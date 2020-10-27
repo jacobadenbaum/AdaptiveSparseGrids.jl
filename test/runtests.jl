@@ -342,7 +342,7 @@ end
     h(x...)  = h(x)
 
     f = AdaptiveSparseGrid(h, [0.0, 0.0], [2 * pi, 2 * pi],
-                           tol=1e-6, max_depth = 20, train=false)
+                           tol=1e-6, max_depth = 20)
 
     for x in LinRange(0,2*pi,100), y in LinRange(0,2*pi,100)
         @test f((x,y)) ≈ h(x,y) atol = 1e-6
