@@ -87,6 +87,16 @@ function rightchild(i::Int,j::Int)
     throw(ArgumentError("i=$i, j=$j are not valid indices"))
 end
 
+function parent(i::Int,j::Int)
+    i >  3              && return (i-1, div(j, 4) * 2 + 1)
+    i == 3  && j == 1   && return (2, 0)
+    i == 3  && j == 3   && return (2, 2)
+    i == 2  && j == 0   && return (1,1)
+    i == 2  && j == 2   && return (1,1)
+    i == 1              && return (0,0)
+    throw(ArgumentError("i=$i, j=$j are not valid indices"))
+end
+
 
 ################################################################################
 #################### Nodes #####################################################
@@ -95,9 +105,7 @@ KTuple{N,T} = Union{NTuple{N,T},
                     NamedTuple{S,V} where {S, V <: NTuple{N,T}}} where {N,T}
 KTuple{N}   = KTuple{N,T} where T
 
-mutable struct Node{D,L,K,T<:KTuple{K}}
-    parent::Int
-    children::MMatrix{D, 2, Int, L}
+mutable struct Node{D,K,T<:KTuple{K}}
     α::T
     x::SVector{D, Float64}
     fx::T
@@ -106,52 +114,66 @@ mutable struct Node{D,L,K,T<:KTuple{K}}
     depth::Int
 end
 
+function Node(T::Type{S}, l, i) where {S <: KTuple}
+    lt = Tuple(l)
+    it = Tuple(i)
+    N  = length(lt)
+
+    return Node(getzero(T),
+                SVector{N}(Y.(lt,it)),
+                getzero(T),
+                lt, it, sum(l) - N + 1)
+end
+
+function Node(α, l::NTuple{N,Int}, i::NTuple{N,Int}, depth) where N
+    x  = SVector{N,Float64}(Y.(l, i))
+    fx = getzero(α)
+    n  = Node(typeof(α), l,i)
+    n.α      = α
+    n.fx     = fx
+    return n
+end
+
+Node(T::KTuple, l, i) = Node(typeof(T), l, i)
+Node(l, i)            = Node(Tuple{Float64}, l, i)
+
 getx(n::Node) = n.x
+getT(::Node{N,K,T}) where {N,K,T} = T
+dims(fun::Node{N,K,T}) where {N,K,T} = (N, K)
 
 getzero(t::T) where {T <: KTuple}                   = T(zero(tv) for tv in t)
 getzero(TT::Type{K}) where {N,T, K <: KTuple{N,T}}  = TT(zero(T) for i in 1:N)
 getzero(t::Vector)                                  = Tuple(zeros(size(t)))
 getzero(t::Number)                                  = (zero(t),)
 
-function Node(parent, children, α, l::NTuple{N,Int}, i::NTuple{N,Int}, depth) where N
-    x  = SVector{N,Float64}(Y.(l, i))
-    fx = getzero(α)
-    return Node(parent, children, α, x, fx, l, i, depth)
-end
-
-function leftchild(idx::Int, p::Node{D,L,K}, d) where {D, L, K}
+function leftchild(p::Node, d)
     # Compute child along the dth dimension
     lc, ic = leftchild(p.l[d], p.i[d])
 
     # When l[d] == 2, there's the possibility that there is no left child
     ic == -1 && return nothing
 
-    return Node(idx,
-                MMatrix{D,2,Int}(zeros(Int, D, 2)),
-                getzero(p.α),
+    return Node(getT(p),
                 (p.l[1:d-1]..., lc, p.l[d+1:end]...),
-                (p.i[1:d-1]..., ic, p.i[d+1:end]...),
-                p.depth + 1)
+                (p.i[1:d-1]..., ic, p.i[d+1:end]...))
 end
 
-function rightchild(idx::Int, p::Node{D,L,K}, d) where {D, L, K}
+function rightchild(idx::Int, p::Node{D,K}, d) where {D, K}
     # Compute child along the dth dimension
     lc, ic = rightchild(p.l[d], p.i[d])
 
     # When l[d] == 2, there's the possibility that there is no right child
     ic == -1 && return nothing
 
-    return Node(idx,
-                MMatrix{D,2,Int}(zeros(Int, D, 2)),
-                getzero(p.α),
+    return Node(getT(p),
                 (p.l[1:d-1]..., lc, p.l[d+1:end]...),
-                (p.i[1:d-1]..., ic, p.i[d+1:end]...),
-                p.depth + 1)
+                (p.i[1:d-1]..., ic, p.i[d+1:end]...))
 end
 
 ϕ(p::Node, x, d) = ϕ(p.l[d], p.i[d], x[d])
 
-function ϕ(p::Node{D,L,K}, x) where {D,L,K}
+function ϕ(p::Node, x)
+    D, K = dims(p)
     u = 1.0
     for d in 1:D
         ud = ϕ(p, x, d)
@@ -168,8 +190,34 @@ end
 #################### Function Representation ###################################
 ################################################################################
 
+Index{N} = Tuple{NTuple{N, Int}, NTuple{N,Int}}
+
+# Recursively apply
+for f in [:leftchild, :rightchild, :parent]
+    """
+    ```
+    $f(idx::$Index, d)
+    ```
+    Apply $f to the dth dimension of the index idx.
+    """
+    @eval function $f(idx::Index, d)
+        l       = idx[1]
+        i       = idx[2]
+
+        if d == 1
+            lc, ic = $f(l[1], i[1])
+            return (lc, Base.tail(l)...), (ic, Base.tail(i)...)
+        elseif d > 1
+            lcc, icc = $f((Base.tail(l), Base.tail(i)), d-1)
+            return (l[1], lcc...), (i[1], icc...)
+        else
+            throw(ArgumentError("Dimension $d must be positive"))
+        end
+    end
+end
+
 mutable struct AdaptiveSparseGrid{N, K, L, T} <: Function
-    nodes::Vector{Node{N, L, K, T}}
+    nodes::Dict{Index{N}, Node{N, K, T}}
     bounds::SMatrix{N, 2, Float64, L}
     depth::Int
     max_depth::Int
@@ -180,28 +228,29 @@ getT(::AdaptiveSparseGrid{N,K,L,T}) where {N,K,L,T} = T
 dims(fun::AdaptiveSparseGrid{N,K,L,T}) where {N,K,L,T} = (N, K)
 dims(fun, i) = dims(fun)[i]
 
-function AdaptiveSparseGrid(f::Function, lb, ub; tol = 1e-3, max_depth = 10)
+function AdaptiveSparseGrid(f::Function, lb, ub; tol = 1e-3, max_depth = 10, train = true)
     N  = length(lb)
     @assert N == length(ub)
 
     # Evaluate the function once to get the output dimensions/types
     fx = f((lb .+ ub)./2)
 
+
     # Make the initial node
-    head = Node(0,
-                MMatrix{N, 2}(zeros(Int, N,2)),
-                getzero(fx),
-                Tuple(1 for i in 1:N),
-                Tuple(1 for i in 1:N),
-                1)
-    nodes = [head]
+    l    = Tuple(1 for i in 1:N)
+    i    = Tuple(1 for i in 1:N)
+    head = Node(getzero(fx), l, i)
+    nodes = Dict((l,i) => head)
 
     # Bounds
     bounds = SMatrix{N, 2}(hcat(lb, ub))
 
     # Construct the approximation, and then fit it
     fun = AdaptiveSparseGrid(nodes, bounds, 1, max_depth)
-    fit!(f, fun, tol = tol)
+
+    if train
+        fit!(f, fun, tol = tol)
+    end
 
     return fun
 end
@@ -277,29 +326,34 @@ function scale(fun::AdaptiveSparseGrid, x)
     return (SVector{N}(x) .- bounds[:,1]) ./ (bounds[:,2] .- bounds[:,1])
 end
 
+function base(fun::AdaptiveSparseGrid)
+    N = dims(fun, 1)
+    return NTuple{N}(1 for i in 1:N), NTuple{N}(1 for i in 1:N)
+end
+
 function evaluate(fun::AdaptiveSparseGrid, x)
     K = dims(fun, 2)
     y = MVector{K}(zeros(K))
     evaluate!(y, fun, x)
 end
 
-evaluate(fun::AdaptiveSparseGrid, x, k)         = evaluate_recursive!(makework(fun,x),    fun, 1, 1, x, k)
-evaluate!(y, fun::AdaptiveSparseGrid, x)        = evaluate_recursive!(y, makework(fun,x), fun, 1, 1, x)
-evaluate!(y, wrk, fun::AdaptiveSparseGrid, x)   = evaluate_recursive!(y, wrk, fun, 1, 1, x)
+evaluate(fun::AdaptiveSparseGrid, x, k)         = evaluate_recursive!(makework(fun,x),    fun, base(fun), 1, x, k)
+evaluate!(y, fun::AdaptiveSparseGrid, x)        = evaluate_recursive!(y, makework(fun,x), fun, base(fun), 1, x)
+evaluate!(y, wrk, fun::AdaptiveSparseGrid, x)   = evaluate_recursive!(y, wrk, fun, base(fun), 1, x)
 
 function makework(fun, x)
-    L = dims(fun,1) + fun.max_depth + 1
+    L = dims(fun,1) + fun.depth + 1
     T = promote_type(Float64, eltype(x))
     return ones(T, L)
 end
 
-function evaluate_recursive!(y, wrk, fun::AdaptiveSparseGrid, idx::Int, dimshift, x)
+function evaluate_recursive!(y, wrk, fun::AdaptiveSparseGrid, idx::Index, dimshift, x)
     # Dimensions of domain/codomain
     N, K = dims(fun)
 
     # Get the node that we're working on now
-    @inbounds node  = fun.nodes[idx]
-    @inbounds depth = node.depth
+    node  = fun.nodes[idx]
+    depth = node.depth
 
     # We have stored the basis function evaluations for every dimension except
     # dimshift -- move that dimension to the end (for storage, so we can put it
@@ -321,12 +375,28 @@ function evaluate_recursive!(y, wrk, fun::AdaptiveSparseGrid, idx::Int, dimshift
     # this basis function), then we continue checking all of it's children
     if u > 0
         for d in 1:N
-            kd = childsplit(node, x, d)
-            kd == 0 && continue
 
-            child = node.children[d,kd]
-            if child  > 0
-                evaluate_recursive!(y, wrk, fun, child, d, x)
+            # Figure out which side we need to be on
+            kd = childsplit(node, x, d)
+
+            # Calculate the index of the left or right child in dimension d
+            if kd > 0
+                if kd == 1
+                    child = leftchild(idx, d)
+                else
+                    child = rightchild(idx, d)
+                end
+
+                # Check if that node is in the tree -- if it is, then descend into
+                # it
+                if haskey(fun.nodes, child)
+                    evaluate_recursive!(y, wrk, fun, child, d, x)
+                end
+            end
+
+            # We descend through the nodes lexicographically
+            if idx[1][d] > 1
+                break
             end
         end
     end
@@ -351,12 +421,12 @@ end
 get(x::KTuple, i::Int)      = x[i]
 get(x::KTuple, s::Symbol)   = getproperty(x, s)
 
-function evaluate_recursive!(wrk, fun::AdaptiveSparseGrid, idx::Int, dimshift, x, k)
+function evaluate_recursive!(wrk, fun::AdaptiveSparseGrid, idx::Index, dimshift, x, k)
     # Dimensions of domain/codomain
     N, K = dims(fun)
 
     # Get the node that we're working on now
-    node = @inbounds fun.nodes[idx]
+    node  = fun.nodes[idx]
     depth = node.depth
 
     # We have stored the basis function evaluations for every dimension except
@@ -377,12 +447,29 @@ function evaluate_recursive!(wrk, fun::AdaptiveSparseGrid, idx::Int, dimshift, x
     # this basis function), then we continue checking all of it's children
     if u > 0
         for d in 1:N
-            kd = childsplit(node, x, d)
-            kd == 0 && continue
 
-            child = node.children[d,kd]
-            if child  > 0
-                y += evaluate_recursive!(wrk, fun, child, d, x, k)
+            # Figure out which side we need to be on
+            kd = childsplit(node, x, d)
+            if kd > 0
+
+                # Calculate the index of the left or right child in dimension d
+                if kd == 1
+                    child = leftchild(idx, d)
+                else
+                    child = rightchild(idx, d)
+                end
+
+                # Check if that node is in the tree -- if it is, then descend into
+                # it
+                if haskey(fun.nodes, child)
+                    y += evaluate_recursive!(wrk, fun, child, d, x, k)
+                end
+
+            end
+
+            # We descend through the nodes lexicographically
+            if idx[1][d] > 1
+                break
             end
         end
     end
@@ -400,10 +487,11 @@ end
 
 function fit!(f, fun::AdaptiveSparseGrid; kwargs...)
     # We need to evaluate f on the base node
-    train!(f, fun, fun.nodes)
+    train!(f, fun, values(fun.nodes))
 
-    while fun.depth < fun.max_depth
-        refinegrid!(f, fun; kwargs...)
+    while true
+        n = refinegrid!(f, fun; kwargs...)
+        n == 0 && break
     end
     return fun
 end
@@ -424,47 +512,114 @@ function refinegrid!(f, fun::AdaptiveSparseGrid; kwargs...)
     # Get the list of possible child nodes
     children = procreate!(fun; kwargs...)
 
+    raise_children!(f, fun, children)
+
+    # Increment the depth counter
+    fun.depth += 1
+    return length(children)
+end
+
+function raise_children!(f, fun::AdaptiveSparseGrid, children)
+
     # Delete duplicates (each node should only be the child of a single parent)
-    sort!(children, by = n -> (id(n)..., n.parent))
+    sort!(children, by = id)
     unique!(id, children)
+
+    # Make sure all of the parents for each child are present (in the function)
+    #   Note: this is trivial in the 1D case, but can be violated in higher
+    #   dimensions unless we explicitly check for it
+    child_support!(f, fun, children)
 
     # Compute the gain for each child
     train!(f, fun, children)
 
     # Insert the new children into the main function
-    drive_to_college!(fun, children; kwargs...)
+    drive_to_college!(fun, children)
 
-    # Increment the depth counter
-    fun.depth += 1
 end
 
-id(n::Node) = (n.l..., n.i...)
+id(n::Node)    = (n.l..., n.i...)
+index(n::Node) = (n.l, n.i)
 
+
+depth(idx::Index{N}) where N = sum(idx[1]) + 1 - N
 function procreate!(fun; tol = 1e-3)
     # Dimensions of function (Domain -> Codomain)
     N, K = dims(fun)
 
     # Get the list of possible child nodes
-    TN       = eltype(fun.nodes)
+    TN       = eltype(values(nodes(fun)))
     children = Vector{TN}(undef, 0)
-    for (idx, node) in enumerate(fun.nodes)
+    for node in values(fun.nodes)
         if node.depth == fun.depth
             # Check the error at this node -- if it's low enough, we can stop
             # refining in this area.
             #
             # Note: We insist on refining up to at least the 3rd layer to make
             # sure that we don't stop prematurely
-            node.depth > 5 && err(node) < tol && continue
+            node.depth > 6 && err(node) < tol   && continue
+
 
             # Add in the children -- this should be a separate function
             for d in 1:N
-                addchildren!(children, idx, node, d)
+                # We also have a width criteria -- we won't continue adding nodes
+                # past a certain level of refinement in each dimension
+                node.l[d] >= fun.max_depth      && continue
+                addchildren!(children, node, d)
             end
-
         end
     end
     return children
 end
+
+function child_support!(f, fun, children)
+
+    # Find the parents who aren't in the function representation
+    TN       = eltype(values(nodes(fun)))
+    parents  = Vector{TN}(undef, 0)
+    for child in children
+        find_parents!(fun, parents, child)
+    end
+
+    # If we have any orphan children, then raise their parents (recursively
+    # searching for grandparents, etc...)
+    if length(parents) > 0
+        raise_children!(f, fun, parents)
+    end
+end
+
+
+"""
+Find the parents of the node `child` and insert them into the list of parents
+"""
+function find_parents!(fun::AdaptiveSparseGrid, parents, child)
+    N, K = dims(fun)
+    for d in 1:N
+        child.l[d] == 1 && continue
+        p = parent(index(child), d)
+        if ! haskey(nodes(fun), p)
+            push!(parents, Node(getT(fun), p...))
+        end
+    end
+end
+
+
+function hasparents(fun::AdaptiveSparseGrid, idx::Index)
+    # Base case
+    all(isequal(1), idx[1]) && return true
+
+    # Recursively check for parents in each dimension
+    N, K = dims(fun)
+    for d in 1:N
+        p = parent(idx, d)
+        any(isequal(0), p[1]) && continue
+        if (! haskey(nodes(fun), p)) || (! hasparents(fun, p))
+            return false
+        end
+    end
+    return true
+end
+
 
 function train!(f, fun::AdaptiveSparseGrid{N,K,L,T}, children) where {N,K,L,T}
     # Evaluate the function and compute the gain for each of the children
@@ -482,36 +637,41 @@ function train!(f, fun::AdaptiveSparseGrid{N,K,L,T}, children) where {N,K,L,T}
 end
 
 """
-This function inserts the children into the list of nodes, and sets up the
-parent/child linkages that allow the child to be used in function evaluations
+This function inserts the children into the list of nodes for the function approximation
 """
-function drive_to_college!(fun, children; tol=1e-3)
+function drive_to_college!(fun, children)
     for child in children
-
-        push!(fun.nodes, child)
-
-        # Update its parent (so that we can find it later)
-        idx                     = length(fun.nodes)
-        pid                     = child.parent
-        parent                  = fun.nodes[pid]
-        dd                      = whichchild(parent, child)
-        parent.children[dd...]  = idx
+        fun.nodes[(child.l, child.i)] = child
     end
 end
 
-function addchildren!(children, idx, node, d)
+function addchildren!(children, node, d)
     # Add the left child
-    child = leftchild(idx, node, d)
+    child = makeleftchild(node, d)
     if !isnothing(child)
         push!(children, child)
     end
 
     # Add the right child
-    child = rightchild(idx, node, d)
+    child = makerightchild(node, d)
     if !isnothing(child)
         push!(children, child)
     end
 end
+
+for f in [:rightchild, :leftchild]
+    ff = Symbol(:make, f)
+    @eval function $ff(node::Node, d)
+        idx = $f(index(node), d)
+        if any(isequal(-1), idx[2])
+            return nothing
+        else
+            return Node(getT(node), idx...)
+        end
+    end
+end
+
+
 
 function whichchild(parent, child)
     # Which dimension is different
@@ -520,9 +680,9 @@ function whichchild(parent, child)
     d  = findfirst(isequal(1), Δl)
 
     # Did we split up or down?
-    if child.i[d] == leftchild(parent.l[d], parent.i[d])[2]
+    if child.i[d] == leftchild(index(parent))[2]
         return (d, 1)
-    elseif child.i[d] == rightchild(parent.l[d], parent.i[d])[2]
+    elseif child.i[d] == rightchild(index(child))[2]
         return (d, 2)
     else
         @show parent, child
@@ -604,7 +764,7 @@ function integrate(int::AdaptiveIntegral, x)
     T    = promote_type(eltype(x), Float64)
     y    = zeros(T, dims(int.fun, 2))
     wrk  = makework(int.fun, x)
-    return integrate_recursive!(y, wrk, int, 1, 1, x)
+    return integrate_recursive!(y, wrk, int, base(int.fun), 1, x)
 end
 
 function scale(int::AdaptiveIntegral, x)
@@ -619,7 +779,7 @@ function scale(int::AdaptiveIntegral, x)
 end
 
 
-function integrate_recursive!(y, wrk, int::AdaptiveIntegral, idx::Int, dimshift, x)
+function integrate_recursive!(y, wrk, int::AdaptiveIntegral, idx::Index, dimshift, x)
     # Dimensions of domain/codomain
     fun  = int.fun
     N, K = dims(fun)
@@ -649,25 +809,34 @@ function integrate_recursive!(y, wrk, int::AdaptiveIntegral, idx::Int, dimshift,
     # this basis function), then we continue checking all of it's children
     if u > 0
         for d in 1:N
+
             # Are we considering in an integration dimension
             dd = in(d, int.dims)
 
             # If not, we can compute which side to split along
             if !dd
                 kd = childsplit(node, x, d)
-                kd == 0 && continue
             end
 
-            # Along the integration dimension, we will always follow all the
-            # splits. But in a non-integration dimension, we can just follow the
-            # binary search tree
             for split in 1:2
                 !dd && kd != split && continue
 
-                child = node.children[d, split]
-                if child  > 0
+                if split == 1
+                    child = leftchild(idx, d)
+                else
+                    child = rightchild(idx, d)
+                end
+
+                # Check if that node is in the tree -- if it is, then descend into
+                # it
+                if haskey(fun.nodes, child)
                     integrate_recursive!(y, wrk, int, child, d, x)
                 end
+            end
+
+            # We descend through the nodes lexicographically
+            if idx[1][d] > 1
+                break
             end
         end
     end
@@ -692,8 +861,8 @@ I(n::Node, d) = I(n.l[d])
 
 function norm(f1::T, f2::T, p=Inf; dim = :) where {T <: AdaptiveSparseGrid}
     # Get the set of evaluation points (union of both functions)
-    Xs = vcat(rescale.(f1, getx.(f1.nodes)),
-              rescale.(f2, getx.(f2.nodes))) |> sort! |> unique!
+    Xs = vcat(rescale.(f1, getx.(values(f1.nodes))),
+              rescale.(f2, getx.(values(f2.nodes)))) |> sort! |> unique!
 
     chx = Channel{eltype(Xs)}(Threads.nthreads()) do c
         for x in Xs
@@ -736,7 +905,7 @@ end
 rel_err(v1,v2) = abs(v1 - v2)/max(min(abs(v1), abs(v2)), 1.0)
 
 function getx(fun::AdaptiveSparseGrid)
-    return rescale.(fun, getx.(fun.nodes))
+    return rescale.(fun, getx.(values(fun.nodes)))
 end
 
 getα(fun::AdaptiveSparseGrid)  = [n.α  for n in fun.nodes]
