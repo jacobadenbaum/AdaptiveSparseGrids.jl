@@ -193,11 +193,20 @@ end
 struct Index{N}
     l::NTuple{N,Int}
     i::NTuple{N,Int}
+    function Index(l::NTuple{N,Int}, i::NTuple{N,Int}, check=true) where N
+        if check
+            for (lk, ik) in zip(l,i)
+                ik > m(lk) && throw(ArgumentError("($l,$i) is not a valid Index"))
+            end
+        end
+        return new{N}(l, i)
+    end
 end
 Base.getindex(idx::Index, k) = k == 1 ? idx.l : idx.i
 Base.length(idx::Index)      = 2
 Base.iterate(idx::Index)     = (idx[1], 2)
 Base.iterate(idx::Index, s)  = s == 2 ? (idx[s], 3) : nothing
+
 
 function Base.hash(idx::Index, h::UInt)
     u = zero(UInt)
@@ -223,10 +232,10 @@ for f in [:leftchild, :rightchild, :parent]
 
         if d == 1
             lc, ic = $f(l[1], i[1])
-            return Index((lc, Base.tail(l)...), (ic, Base.tail(i)...))
+            return Index((lc, Base.tail(l)...), (ic, Base.tail(i)...), false)
         elseif d > 1
-            lcc, icc = $f(Index(Base.tail(l), Base.tail(i)), d-1)
-            return Index((l[1], lcc...), (i[1], icc...))
+            lcc, icc = $f(Index(Base.tail(l), Base.tail(i), false), d-1)
+            return Index((l[1], lcc...), (i[1], icc...), false)
         else
             throw(ArgumentError("Dimension $d must be positive"))
         end
