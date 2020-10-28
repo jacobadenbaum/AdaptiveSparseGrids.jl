@@ -190,7 +190,14 @@ end
 #################### Function Representation ###################################
 ################################################################################
 
-Index{N} = Tuple{NTuple{N, Int}, NTuple{N,Int}}
+struct Index{N}
+    l::NTuple{N,Int}
+    i::NTuple{N,Int}
+end
+Base.getindex(idx::Index, k) = k == 1 ? idx.l : idx.i
+Base.length(idx::Index)      = 2
+Base.iterate(idx::Index)     = (idx[1], 2)
+Base.iterate(idx::Index, s)  = s == 2 ? (idx[s], 3) : nothing
 
 # Recursively apply
 for f in [:leftchild, :rightchild, :parent]
@@ -206,10 +213,10 @@ for f in [:leftchild, :rightchild, :parent]
 
         if d == 1
             lc, ic = $f(l[1], i[1])
-            return (lc, Base.tail(l)...), (ic, Base.tail(i)...)
+            return Index((lc, Base.tail(l)...), (ic, Base.tail(i)...))
         elseif d > 1
-            lcc, icc = $f((Base.tail(l), Base.tail(i)), d-1)
-            return (l[1], lcc...), (i[1], icc...)
+            lcc, icc = $f(Index(Base.tail(l), Base.tail(i)), d-1)
+            return Index((l[1], lcc...), (i[1], icc...))
         else
             throw(ArgumentError("Dimension $d must be positive"))
         end
@@ -240,7 +247,7 @@ function AdaptiveSparseGrid(f::Function, lb, ub; tol = 1e-3, max_depth = 10, tra
     l    = Tuple(1 for i in 1:N)
     i    = Tuple(1 for i in 1:N)
     head = Node(getzero(fx), l, i)
-    nodes = Dict((l,i) => head)
+    nodes = Dict(Index(l,i) => head)
 
     # Bounds
     bounds = SMatrix{N, 2}(hcat(lb, ub))
@@ -328,7 +335,7 @@ end
 
 function base(fun::AdaptiveSparseGrid)
     N = dims(fun, 1)
-    return NTuple{N}(1 for i in 1:N), NTuple{N}(1 for i in 1:N)
+    return Index(NTuple{N}(1 for i in 1:N), NTuple{N}(1 for i in 1:N))
 end
 
 function evaluate(fun::AdaptiveSparseGrid, x)
@@ -539,7 +546,7 @@ function raise_children!(f, fun::AdaptiveSparseGrid, children)
 end
 
 id(n::Node)    = (n.l..., n.i...)
-index(n::Node) = (n.l, n.i)
+index(n::Node) = Index(n.l, n.i)
 
 
 depth(idx::Index{N}) where N = sum(idx[1]) + 1 - N
@@ -641,7 +648,7 @@ This function inserts the children into the list of nodes for the function appro
 """
 function drive_to_college!(fun, children)
     for child in children
-        fun.nodes[(child.l, child.i)] = child
+        fun.nodes[Index(child.l, child.i)] = child
     end
 end
 
