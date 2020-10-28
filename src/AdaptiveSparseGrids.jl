@@ -199,6 +199,16 @@ Base.length(idx::Index)      = 2
 Base.iterate(idx::Index)     = (idx[1], 2)
 Base.iterate(idx::Index, s)  = s == 2 ? (idx[s], 3) : nothing
 
+function Base.hash(idx::Index, h::UInt)
+    u = zero(UInt)
+    s = one(UInt)
+    for (l, i) in zip(idx.l, idx.i)
+        u += i * s
+        s *= m(l)
+    end
+    return hash(u, h)
+end
+
 # Recursively apply
 for f in [:leftchild, :rightchild, :parent]
     """
