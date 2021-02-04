@@ -1,7 +1,7 @@
 name = "AdaptiveSparseGrids"
 uuid = "676d8d29-539e-4f06-b848-7dd647dd5291"
 authors = ["Jacob Adenbaum <jacobadenbaum@gmail.com>"]
-version = "0.1.0"
+version = "0.1.1"
 
 [deps]
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
