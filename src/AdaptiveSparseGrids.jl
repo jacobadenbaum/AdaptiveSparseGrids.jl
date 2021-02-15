@@ -269,7 +269,7 @@ function AdaptiveSparseGrid(f::Function, lb, ub; tol = 1e-3, max_depth = 10, tra
     nodes = Dict(Index(l,i) => head)
 
     # Bounds
-    bounds = SMatrix{N, 2}(hcat(lb, ub))
+    bounds = SMatrix{N, 2}(hcat(SVector{N}(lb), SVector{N}(ub)))
 
     # Construct the approximation, and then fit it
     fun = AdaptiveSparseGrid(nodes, bounds, 1, max_depth)
