@@ -320,6 +320,18 @@ end
 
     @test f(pi/2, :sin) == f(pi/2, 1)
     @test f(pi/2, :cos) == f(pi/2, 2)
+
+    # Test that everything still works when you construct with Tuple Boundaries
+    for g in [x -> x^2, sin, cos, exp]
+        f = AdaptiveSparseGrid((0.0,), (10.0,), tol=1e-8, max_depth = 20) do x
+            g.(x)
+        end
+
+        for x in LinRange(0, 10, 1_000)
+            @test abs(f(x) - g(x))/max(g(x),1) < 1e-8
+        end
+    end
+
 end
 
 @testset "Integration Tests (1D)" begin
@@ -359,7 +371,16 @@ end
 
     # Check that the max depth parameter works
     @test mapreduce(x -> x.depth, max, values(nodes(f))) <= f.max_depth
+    
+    # Check that Tuple Constructors Work
+    f = AdaptiveSparseGrid(h, (0.0, 0.0), (2 * pi, 2 * pi),
+                           tol=1e-6, max_depth = 20)
 
+    for x in LinRange(0,2*pi,100), y in LinRange(0,2*pi,100)
+        @test f((x,y)) ≈ h(x,y) atol = 1e-6
+        @test f((x,y)) == f(x,y)
+    end
+    
     # Now a version from R^2 →  R^2
     h((x,y)) = (a = sin(x) * cos(y), b = x^2 + y^2)
 
