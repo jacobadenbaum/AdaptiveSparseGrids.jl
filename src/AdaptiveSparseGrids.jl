@@ -242,7 +242,7 @@ for f in [:leftchild, :rightchild, :parent]
     end
 end
 
-mutable struct AdaptiveSparseGrid{D, N, K, L, T} <: Function
+mutable struct AdaptiveSparseGrid{D, N, K, L, T} 
     nodes::Dict{Index{N}, Node{N, K, T}}
     bounds::SMatrix{N, 2, Float64, L}
     depth::Int
@@ -256,7 +256,7 @@ dims(::AdaptiveSparseGrid{D,N,K,L,T}) where {D,N,K,L,T} = (N, K)
 dims(::Type{AdaptiveSparseGrid{D,N,K,L,T}}) where {D,N,K,L,T} = (N, K)
 dims(fun, i) = dims(fun)[i]
 
-function AdaptiveSparseGrid(f::Function, lb, ub; tol = 1e-3, max_depth = 10, train = true)
+function AdaptiveSparseGrid(f, lb, ub; tol = 1e-3, max_depth = 10, train = true)
     N  = length(lb)
     @assert N == length(ub)
 
@@ -739,7 +739,7 @@ function AdaptiveIntegral(fun::AdaptiveSparseGrid, dd)
 end
 
 
-function AdaptiveIntegral(f::Function, lb, ub, dd; kwargs...)
+function AdaptiveIntegral(f, lb, ub, dd; kwargs...)
     fun = AdaptiveSparseGrid(f, lb, ub; kwargs...)
     return AdaptiveIntegral(fun, dd)
 end
