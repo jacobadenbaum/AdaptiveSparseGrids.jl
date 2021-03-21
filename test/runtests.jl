@@ -370,7 +370,7 @@ end
     end
 
     # Check that the max depth parameter works
-    @test mapreduce(x -> x.depth, max, values(nodes(f))) <= f.max_depth
+    @test mapreduce(x -> x.depth, max, values(nodes(f))) <= AdaptiveSparseGrids.max_depth(f)
     
     # Check that Tuple Constructors Work
     f = AdaptiveSparseGrid(h, (0.0, 0.0), (2 * pi, 2 * pi),
