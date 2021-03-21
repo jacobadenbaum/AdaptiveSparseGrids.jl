@@ -364,17 +364,17 @@ function evaluate(fun::AdaptiveSparseGrid, x)
     evaluate!(y, fun, x)
 end
 
-evaluate(fun::AdaptiveSparseGrid, x, k)         = evaluate_recursive!(makework(fun,x),    fun, base(fun), 1, x, k)
-evaluate!(y, fun::AdaptiveSparseGrid, x)        = evaluate_recursive!(y, makework(fun,x), fun, base(fun), 1, x)
-evaluate!(y, wrk, fun::AdaptiveSparseGrid, x)   = evaluate_recursive!(y, wrk, fun, base(fun), 1, x)
+evaluate(fun::AdaptiveSparseGrid, x, k)         = evaluate_recursive(makework(fun,x),    fun, base(fun), 1, x, k)
+evaluate!(y, fun::AdaptiveSparseGrid, x)        = evaluate_recursive(y, makework(fun,x), fun, base(fun), 1, x)
+evaluate!(y, wrk, fun::AdaptiveSparseGrid, x)   = evaluate_recursive(y, wrk, fun, base(fun), 1, x)
 
 function makework(fun, x)
-    L = dims(fun,1) + max_depth(fun) + 1
+    N = dims(fun,1)
     T = promote_type(Float64, eltype(x))
-    return @SVector ones(T, L)
+    return @SVector ones(T, N)
 end
 
-function evaluate_recursive!(y, wrk, fun::AdaptiveSparseGrid, idx::Index, dimshift, x)
+function evaluate_recursive(y, wrk, fun::AdaptiveSparseGrid, idx::Index, dimshift, x)
     # Dimensions of domain/codomain
     N, K = dims(fun)
 
@@ -383,9 +383,7 @@ function evaluate_recursive!(y, wrk, fun::AdaptiveSparseGrid, idx::Index, dimshi
     depth = node.depth
 
     # We have stored the basis function evaluations for every dimension except
-    # dimshift -- move that dimension to the end (for storage, so we can put it
-    # back later)
-    wrk = setindex(wrk, wrk[dimshift],          N+depth)
+    # dimshift 
     wrk = setindex(wrk, ϕ(node, x, dimshift),   dimshift)
 
     # Compute the product across all the dimensions
@@ -418,7 +416,7 @@ function evaluate_recursive!(y, wrk, fun::AdaptiveSparseGrid, idx::Index, dimshi
                 # Check if that node is in the tree -- if it is, then descend into
                 # it
                 if haskey(fun.nodes, child)
-                    y = evaluate_recursive!(y, wrk, fun, child, d, x)
+                    y = evaluate_recursive(y, wrk, fun, child, d, x)
                 end
             end
 
@@ -428,10 +426,6 @@ function evaluate_recursive!(y, wrk, fun::AdaptiveSparseGrid, idx::Index, dimshi
             end
         end
     end
-
-    # We have to clean up the work buffer now (we want all entries with index <
-    # N + depth put back the way we found them)
-    wrk = setindex(wrk, wrk[N + depth], dimshift)
 
     return y
 end
@@ -449,7 +443,7 @@ end
 get(x::KTuple, i::Int)      = x[i]
 get(x::KTuple, s::Symbol)   = getproperty(x, s)
 
-function evaluate_recursive!(wrk, fun::AdaptiveSparseGrid, idx::Index, dimshift, x, k)
+function evaluate_recursive(wrk, fun::AdaptiveSparseGrid, idx::Index, dimshift, x, k)
     # Dimensions of domain/codomain
     N, K = dims(fun)
 
@@ -458,9 +452,7 @@ function evaluate_recursive!(wrk, fun::AdaptiveSparseGrid, idx::Index, dimshift,
     depth = node.depth
 
     # We have stored the basis function evaluations for every dimension except
-    # dimshift -- move that dimension to the end (for storage, so we can put it
-    # back later)
-    wrk = setindex(wrk, wrk[dimshift],          N+depth)
+    # dimshift 
     wrk = setindex(wrk, ϕ(node, x, dimshift),   dimshift)
 
     # Compute the product across all the dimensions
@@ -491,7 +483,7 @@ function evaluate_recursive!(wrk, fun::AdaptiveSparseGrid, idx::Index, dimshift,
                 # Check if that node is in the tree -- if it is, then descend into
                 # it
                 if haskey(fun.nodes, child)
-                    y += evaluate_recursive!(wrk, fun, child, d, x, k)
+                    y += evaluate_recursive(wrk, fun, child, d, x, k)
                 end
 
             end
@@ -502,10 +494,6 @@ function evaluate_recursive!(wrk, fun::AdaptiveSparseGrid, idx::Index, dimshift,
             end
         end
     end
-
-    # We have to clean up the work buffer now (we want all entries with index <
-    # N + depth put back the way we found them)
-    wrk = setindex(wrk, wrk[N + depth], dimshift)
 
     return y
 end
@@ -818,9 +806,7 @@ function integrate_recursive!(y, wrk, int::AdaptiveIntegral, idx::Index, dimshif
     @inbounds depth = node.depth
 
     # We have stored the basis function evaluations for every dimension except
-    # dimshift -- move that dimension to the end (for storage, so we can put it
-    # back later)
-    wrk = setindex(wrk, wrk[dimshift],          N+depth)
+    # dimshift 
     newval = in(dimshift, int.dims) ?
                 I(node,dimshift)     :
                 ϕ(node, x, dimshift)
@@ -872,10 +858,6 @@ function integrate_recursive!(y, wrk, int::AdaptiveIntegral, idx::Index, dimshif
             end
         end
     end
-
-    # We have to clean up the work buffer now (we want all entries with index <
-    # N + depth put back the way we found them)
-    wrk = setindex(wrk, wrk[N + depth], dimshift)
 
     return y
 end
