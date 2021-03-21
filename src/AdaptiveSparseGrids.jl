@@ -584,7 +584,7 @@ function procreate!(fun; tol = 1e-3)
             #
             # Note: We insist on refining up to at least the 3rd layer to make
             # sure that we don't stop prematurely
-            node.depth > 3 && err(node) < tol   && continue
+            node.depth > 6 && err(node) < tol   && continue
 
 
             # Add in the children -- this should be a separate function
