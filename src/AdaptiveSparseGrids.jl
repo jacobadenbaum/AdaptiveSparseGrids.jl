@@ -253,6 +253,7 @@ getT(::AdaptiveSparseGrid{D,N,K,L,T}) where {D,N,K,L,T} = T
 max_depth(::AdaptiveSparseGrid{D,N,K,L,T}) where {D,N,K,L,T} = D
 
 dims(::AdaptiveSparseGrid{D,N,K,L,T}) where {D,N,K,L,T} = (N, K)
+dims(::Type{AdaptiveSparseGrid{D,N,K,L,T}}) where {D,N,K,L,T} = (N, K)
 dims(fun, i) = dims(fun)[i]
 
 function AdaptiveSparseGrid(f::Function, lb, ub; tol = 1e-3, max_depth = 10, train = true)
@@ -354,8 +355,14 @@ function scale(fun::AdaptiveSparseGrid, x)
 end
 
 function base(fun::AdaptiveSparseGrid)
-    N = dims(fun, 1)
-    return Index(NTuple{N}(1 for i in 1:N), NTuple{N}(1 for i in 1:N))
+    if @generated
+        N = dims(fun, 1)
+        ex = Expr(:tuple, (:1 for i in 1:N)...) 
+        return :(Index($ex, $ex))
+    else
+        N = dims(fun, 1)
+        return Index(NTuple{N}(1 for i in 1:N), NTuple{N}(1 for i in 1:N))
+    end
 end
 
 function evaluate(fun::AdaptiveSparseGrid, x)
