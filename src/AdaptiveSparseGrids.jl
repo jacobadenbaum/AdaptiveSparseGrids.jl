@@ -649,13 +649,11 @@ function train!(f, fun::AdaptiveSparseGrid{D,N,K,L,T}, children) where {D,N,K,L,
     # Evaluate the function and compute the gain for each of the children
     # Note: This should be done in parallel, since this is where all of the hard
     # work (computing function evaluations) happens
-    @sync for child in children
-        Threads.@spawn begin
-            x           = getx(child)
-            child.fx    = T(f(rescale(fun, x)))
-            ux          = evaluate(fun, x)
-            child.α     = T(Tuple(child.fx) .- ux)
-        end
+    Threads.@threads for child in children
+        x           = getx(child)
+        child.fx    = T(f(rescale(fun, x)))
+        ux          = evaluate(fun, x)
+        child.α     = T(Tuple(child.fx) .- ux)
     end
     return
 end
