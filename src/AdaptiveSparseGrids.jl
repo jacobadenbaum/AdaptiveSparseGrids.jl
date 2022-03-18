@@ -375,9 +375,15 @@ evaluate(fun::AdaptiveSparseGrid, x, k)         = evaluate_recursive(makework(fu
 evaluate!(y, fun::AdaptiveSparseGrid, x)        = evaluate_recursive(y, makework(fun,x), fun, base(fun), 1, x)
 evaluate!(y, wrk, fun::AdaptiveSparseGrid, x)   = evaluate_recursive(y, wrk, fun, base(fun), 1, x)
 
-function makework(fun, x)
+function makework(fun, x::AbstractVector)
     N = dims(fun,1)
     T = promote_type(Float64, eltype(x))
+    return @SVector ones(T, N)
+end
+
+function makework(fun, x)
+    N = dims(fun, 1)
+    T = promote_type(Float64, mapreduce(typeof, promote_type, x))
     return @SVector ones(T, N)
 end
 
