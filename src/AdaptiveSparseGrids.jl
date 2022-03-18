@@ -242,18 +242,18 @@ for f in [:leftchild, :rightchild, :parent]
     end
 end
 
-mutable struct AdaptiveSparseGrid{D, N, K, L, T} 
+mutable struct AdaptiveSparseGrid{N, K, L, T} 
     nodes::Dict{Index{N}, Node{N, K, T}}
     bounds::SMatrix{N, 2, Float64, L}
     depth::Int
-    max_depth::Val{D}
+    max_depth::Int
 end
 
-getT(::AdaptiveSparseGrid{D,N,K,L,T}) where {D,N,K,L,T} = T
-max_depth(::AdaptiveSparseGrid{D,N,K,L,T}) where {D,N,K,L,T} = D
+getT(::AdaptiveSparseGrid{N,K,L,T}) where {N,K,L,T} = T
+max_depth(f::AdaptiveSparseGrid) = f.max_depth
 
-dims(::AdaptiveSparseGrid{D,N,K,L,T}) where {D,N,K,L,T} = (N, K)
-dims(::Type{AdaptiveSparseGrid{D,N,K,L,T}}) where {D,N,K,L,T} = (N, K)
+dims(::AdaptiveSparseGrid{N,K,L,T}) where {N,K,L,T} = (N, K)
+dims(::Type{AdaptiveSparseGrid{N,K,L,T}}) where {N,K,L,T} = (N, K)
 dims(fun, i) = dims(fun)[i]
 
 function AdaptiveSparseGrid(f, lb, ub; tol = 1e-3, max_depth = 10, train = true)
@@ -274,7 +274,7 @@ function AdaptiveSparseGrid(f, lb, ub; tol = 1e-3, max_depth = 10, train = true)
     bounds = SMatrix{N, 2}(hcat(SVector{N}(lb), SVector{N}(ub)))
 
     # Construct the approximation, and then fit it
-    fun = AdaptiveSparseGrid(nodes, bounds, 1, Val(max_depth))
+    fun = AdaptiveSparseGrid(nodes, bounds, 1, max_depth)
 
     if train
         fit!(f, fun, tol = tol)
@@ -302,19 +302,19 @@ end
     end
 end
 
-function (fun::AdaptiveSparseGrid{D,N,1,L,T})(x) where {D,N,L,T}
+function (fun::AdaptiveSparseGrid{N,1,L,T})(x) where {N,L,T}
     return evaluate(fun, scale(fun, x), 1)
 end
 
-function (fun::AdaptiveSparseGrid{D,N,1,L,T})(x...) where {D,N,L,T}
+function (fun::AdaptiveSparseGrid{N,1,L,T})(x...) where {N,L,T}
     return evaluate(fun, scale(fun, x), 1)
 end
 
-function (fun::AdaptiveSparseGrid{D,N,1,L,T})(x, s::Symbol) where {D,N,L,T}
+function (fun::AdaptiveSparseGrid{N,1,L,T})(x, s::Symbol) where {N,L,T}
     return evaluate(fun, scale(fun, x), s)
 end
 
-function (fun::AdaptiveSparseGrid{D,N,1,L,T})(x, s::Int) where {D,N,L,T}
+function (fun::AdaptiveSparseGrid{N,1,L,T})(x, s::Int) where {N,L,T}
     return evaluate(fun, scale(fun, x), s)
 end
 
@@ -645,7 +645,7 @@ function hasparents(fun::AdaptiveSparseGrid, idx::Index)
 end
 
 
-function train!(f, fun::AdaptiveSparseGrid{D,N,K,L,T}, children) where {D,N,K,L,T}
+function train!(f, fun::AdaptiveSparseGrid{N,K,L,T}, children) where {N,K,L,T}
     # Evaluate the function and compute the gain for each of the children
     # Note: This should be done in parallel, since this is where all of the hard
     # work (computing function evaluations) happens
