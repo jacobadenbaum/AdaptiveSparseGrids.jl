@@ -403,7 +403,97 @@ end
 
 end
 
+@testset "Minimum-Depth Tests (1D)" begin
+
+    for g in [x -> x^2, sin, cos, exp]
+        f = AdaptiveSparseGrid([0.0], [10.0], tol=1e-8, max_depth = 20, min_depth=1) do x
+            g.(x)
+        end
+
+        for x in LinRange(0, 10, 1_000)
+            @test abs(f(x) - g(x))/max(g(x),1) < 1e-8
+        end
+    end
+
+    # Test the named tuple features
+    f = AdaptiveSparseGrid([0.0], [10.0], tol=1e-8, max_depth = 20, min_depth=1) do (x,)
+        (sin = sin(x), cos = cos(x), x2 = x^2)
+    end
+
+    @test f(pi/2, :sin) ≈ 1.0
+    @test f(pi/2, :cos) ≈ 0.0 atol=1e-8
+    @test f(pi  , :sin) ≈ 0.0 atol=1e-8
+    @test f(pi  , :cos) ≈ -1.0
+
+    @test f(pi/2, :sin) == f(pi/2, 1)
+    @test f(pi/2, :cos) == f(pi/2, 2)
+
+    # Test that everything still works when you construct with Tuple Boundaries
+    for g in [x -> x^2, sin, cos, exp]
+        f = AdaptiveSparseGrid((0.0,), (10.0,), tol=1e-8, max_depth = 20, min_depth=1) do x
+            g.(x)
+        end
+
+        for x in LinRange(0, 10, 1_000)
+            @test abs(f(x) - g(x))/max(g(x),1) < 1e-8
+        end
+    end
+
+end
+
+@testset "Minimum-Depth Tests (2D)" begin
+
+    h((x,y)) = sin(x) * cos(x)
+    h(x...)  = h(x)
+
+    f = AdaptiveSparseGrid(h, [0.0, 0.0], [2 * pi, 2 * pi],
+                           tol=1e-6, max_depth = 20, min_depth=10)
+
+    for x in LinRange(0,2*pi,100), y in LinRange(0,2*pi,100)
+        @test f((x,y)) ≈ h(x,y) atol = 1e-6
+        @test f((x,y)) == f(x,y)
+    end
+
+    # Check that using integers works fine
+    for x in LinRange(0, 2*pi, 100)
+        @test f((x,1)) == f(x, 1.0)
+        @test f((1,x)) == f(1.0, x)
+        @test f((x,2)) == f(x, 2.0)
+        @test f((2,x)) == f(2.0, x)
+    end
+
+    # Check that the max depth parameter works
+    @test mapreduce(x -> x.depth, max, values(nodes(f))) <= AdaptiveSparseGrids.max_depth(f)
+    
+    # Check that Tuple Constructors Work
+    f = AdaptiveSparseGrid(h, (0.0, 0.0), (2 * pi, 2 * pi),
+                           tol=1e-6, max_depth = 20, min_depth=10)
+
+    for x in LinRange(0,2*pi,100), y in LinRange(0,2*pi,100)
+        @test f((x,y)) ≈ h(x,y) atol = 1e-6
+        @test f((x,y)) == f(x,y)
+    end
+    
+    # Now a version from R^2 →  R^2
+    h((x,y)) = (a = sin(x) * cos(y), b = x^2 + y^2)
+
+    f = AdaptiveSparseGrid(h, [0.0, 0.0], [2 * pi, 2 * pi],
+                           tol=1e-6, max_depth = 30, min_depth=10)
+
+    for x in LinRange(0,2*pi,100), y in LinRange(0,2*pi,100)
+        @test f((x,y),:a) ≈ h(x,y).a atol = 1e-5
+    end
+
+    # Check that using integers works fine
+    for x in LinRange(0, 2*pi, 3)
+        @test f((x,1)) == f((x, 1.0))
+    end
+
+    for x in LinRange(0, 2*pi, 3)
+        @test f((1,x)) == f((1.0, x))
+    end
 
 
+end
 
 end

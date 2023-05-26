@@ -247,16 +247,18 @@ mutable struct AdaptiveSparseGrid{N, K, L, T}
     bounds::SMatrix{N, 2, Float64, L}
     depth::Int
     max_depth::Int
+    min_depth::Int
 end
 
 getT(::AdaptiveSparseGrid{N,K,L,T}) where {N,K,L,T} = T
 max_depth(f::AdaptiveSparseGrid) = f.max_depth
+min_depth(f::AdaptiveSparseGrid) = f.min_depth
 
 dims(::AdaptiveSparseGrid{N,K,L,T}) where {N,K,L,T} = (N, K)
 dims(::Type{AdaptiveSparseGrid{N,K,L,T}}) where {N,K,L,T} = (N, K)
 dims(fun, i) = dims(fun)[i]
 
-function AdaptiveSparseGrid(f, lb, ub; tol = 1e-3, max_depth = 10, train = true)
+function AdaptiveSparseGrid(f, lb, ub; tol = 1e-3, max_depth = 10, train = true, min_depth = 6)
     N  = length(lb)
     @assert N == length(ub)
 
@@ -274,7 +276,7 @@ function AdaptiveSparseGrid(f, lb, ub; tol = 1e-3, max_depth = 10, train = true)
     bounds = SMatrix{N, 2}(hcat(SVector{N}(lb), SVector{N}(ub)))
 
     # Construct the approximation, and then fit it
-    fun = AdaptiveSparseGrid(nodes, bounds, 1, max_depth)
+    fun = AdaptiveSparseGrid(nodes, bounds, 1, max_depth, min_depth)
 
     if train
         fit!(f, fun, tol = tol)
@@ -587,7 +589,7 @@ function procreate!(fun; tol = 1e-3)
             #
             # Note: We insist on refining up to at least the 3rd layer to make
             # sure that we don't stop prematurely
-            node.depth > 6 && err(node) < tol   && continue
+            node.depth > min_depth(fun) && err(node) < tol   && continue
 
 
             # Add in the children -- this should be a separate function
