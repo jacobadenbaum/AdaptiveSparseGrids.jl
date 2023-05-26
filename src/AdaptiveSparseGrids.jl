@@ -258,7 +258,7 @@ dims(::AdaptiveSparseGrid{N,K,L,T}) where {N,K,L,T} = (N, K)
 dims(::Type{AdaptiveSparseGrid{N,K,L,T}}) where {N,K,L,T} = (N, K)
 dims(fun, i) = dims(fun)[i]
 
-function AdaptiveSparseGrid(f, lb, ub; tol = 1e-3, min_depth = 3, max_depth = 10, train = true)
+function AdaptiveSparseGrid(f, lb, ub; tol = 1e-3, max_depth = 10, train = true, min_depth = 6)
     N  = length(lb)
     @assert N == length(ub)
 
@@ -276,7 +276,7 @@ function AdaptiveSparseGrid(f, lb, ub; tol = 1e-3, min_depth = 3, max_depth = 10
     bounds = SMatrix{N, 2}(hcat(SVector{N}(lb), SVector{N}(ub)))
 
     # Construct the approximation, and then fit it
-    fun = AdaptiveSparseGrid(nodes, bounds, 1, min_depth, max_depth)
+    fun = AdaptiveSparseGrid(nodes, bounds, 1, max_depth, min_depth)
 
     if train
         fit!(f, fun, tol = tol)
