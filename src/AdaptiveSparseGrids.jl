@@ -18,6 +18,11 @@ function m(i::Int)
     throw(ArgumentError("i must be a nonnegative integer.  You passed $i"))
 end
 
+# Unchecked hot-path variant. Only valid for i >= 1; used by ϕ / I on
+# grid nodes where `l[d]` is always >= 1. Dropping the throw branch
+# lets LLVM eliminate the GC-frame setup inside evaluate_recursive.
+@inline _m(i::Int) = i > 1 ? (2 << (i-2)) : 1
+
 function Y(i::Int,j::Int)
     # Recover the dimension of the ith layer
     mi = m(i)
@@ -51,13 +56,20 @@ function Dϕ(x::Real)
 end
 
 
-function ϕ(i,j,x)
-    i > 2               && return ϕ(x*m(i) - j)
-    i == 2 && j == 0    && return 0.0 <= x <= 0.5 ?  1 - 2 * x : 0.0
-    i == 2 && j == 2    && return 0.5 <= x <= 1   ?  2 * x - 1 : 0.0
-    i == 2 && j == 1    && return ϕ(2*x - 1)
-    i == 1              && return 0.0 <= x <= 1   ? 1.0 : 0.0
-    throw(ArgumentError("i=$i, j=$j are not valid indices"))
+@inline function ϕ(i, j, x)
+    # No throw path: LLVM would otherwise emit a GC frame for the
+    # ArgumentError string interpolation even though the branch is
+    # unreachable with well-formed (l, i) on the grid. Only call
+    # with a valid (i, j) pair; this is internal.
+    if i > 2
+        return ϕ(x*_m(i) - j)
+    elseif i == 2
+        j == 0 && return 0.0 <= x <= 0.5 ? 1 - 2*x : 0.0
+        j == 2 && return 0.5 <= x <= 1   ? 2*x - 1 : 0.0
+        return ϕ(2*x - 1)            # j == 1
+    else                             # i == 1
+        return 0.0 <= x <= 1 ? 1.0 : 0.0
+    end
 end
 
 ϕ(i::Int, j::Int) = x -> ϕ(i,j,x)
@@ -209,8 +221,8 @@ function rightchild(idx::Int, p::Node{D,K}, d) where {D, K}
                 (p.i[1:d-1]..., ic, p.i[d+1:end]...))
 end
 
-ϕ(p::Node,     x, d) = ϕ(p.l[d], p.i[d], x[d])
-ϕ(p::EvalNode, x, d) = ϕ(p.l[d], p.i[d], x[d])
+@inline ϕ(p::Node,     x, d) = @inbounds ϕ(p.l[d], p.i[d], x[d])
+@inline ϕ(p::EvalNode, x, d) = @inbounds ϕ(p.l[d], p.i[d], x[d])
 
 function ϕ(p::Node, x)
     D, K = dims(p)
@@ -578,7 +590,7 @@ function evaluate_recursive(y, wrk, arr::Vector{EvalNode{D,K,T}},
                              node::EvalNode{D,K,T}, dimshift, x) where {D,K,T}
     # We have stored the basis function evaluations for every dimension except
     # dimshift
-    wrk = setindex(wrk, ϕ(node, x, dimshift), dimshift)
+    wrk = @inbounds setindex(wrk, ϕ(node, x, dimshift), dimshift)
 
     # Compute the product across all the dimensions
     u = 1.0
@@ -613,15 +625,17 @@ function evaluate_recursive(y, wrk, arr::Vector{EvalNode{D,K,T}},
     return y
 end
 
-function childsplit(n::Node, x, d)
-    nxd = n.x[d]; xd = x[d]
+@inline function childsplit(n::Node, x, d)
+    @inbounds nxd = n.x[d]
+    @inbounds xd  = x[d]
     nxd > xd && return 1
     nxd < xd && return 2
     return 0
 end
 
-function childsplit(n::EvalNode, x, d)
-    nxd = n.x[d]; xd = x[d]
+@inline function childsplit(n::EvalNode, x, d)
+    @inbounds nxd = n.x[d]
+    @inbounds xd  = x[d]
     nxd > xd && return 1
     nxd < xd && return 2
     return 0
@@ -632,14 +646,14 @@ get(x::KTuple, s::Symbol)   = getproperty(x, s)
 
 function evaluate_recursive(wrk, arr::Vector{EvalNode{D,K,T}},
                              node::EvalNode{D,K,T}, dimshift, x, k) where {D,K,T}
-    wrk = setindex(wrk, ϕ(node, x, dimshift), dimshift)
+    wrk = @inbounds setindex(wrk, ϕ(node, x, dimshift), dimshift)
 
     u = 1.0
     @inbounds for d in 1:D
         u *= wrk[d]
     end
 
-    y = u * get(node.α, k)
+    y = u * @inbounds(get(node.α, k))
 
     if u > 0
         @inbounds for d in 1:D
@@ -1047,7 +1061,7 @@ function integrate_recursive!(y, wrk, int::AdaptiveIntegral,
     newval = in(dimshift, int.dims) ?
                 I(node, dimshift)  :
                 ϕ(node, x, dimshift)
-    wrk = setindex(wrk, newval, dimshift)
+    wrk = @inbounds setindex(wrk, newval, dimshift)
 
     u = 1.0
     @inbounds for d in 1:D
@@ -1080,15 +1094,16 @@ function integrate_recursive!(y, wrk, int::AdaptiveIntegral,
     return y
 end
 
-function I(l)
-    l >  2 && return 1/(2 << (l-2))
+@inline function I(l)
+    # Hot path from integrate_recursive!. Only called with l >= 1 on
+    # the grid; no throw branch so LLVM can drop the GC frame.
+    l > 2  && return 1/(2 << (l-2))
     l == 2 && return 1/4
-    l == 1 && return 1.0
-    throw(ArgumentError("l must be positive"))
+    return 1.0                     # l == 1
 end
 
-I(n::Node,     d) = I(n.l[d])
-I(n::EvalNode, d) = I(n.l[d])
+@inline I(n::Node,     d) = @inbounds I(n.l[d])
+@inline I(n::EvalNode, d) = @inbounds I(n.l[d])
 ################################################################################
 ##################### Helper Utilities #########################################
 ################################################################################
