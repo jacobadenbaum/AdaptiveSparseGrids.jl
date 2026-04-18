@@ -92,7 +92,9 @@ using QuadGK
     end
 
     @testset "Dϕ: Derivatives" begin
-        for x in LinRange(-1, 1, 5)
+        # Only interior points: ϕ has kinks at x ∈ {-1, 0, 1} and ForwardDiff's
+        # convention for abs'(0) differs from the one-sided value we return.
+        for x in [-0.9, -0.4, 0.3, 0.6, 0.9]
             @test Dϕ(x) == ForwardDiff.derivative(ϕ, x)
         end
     end
