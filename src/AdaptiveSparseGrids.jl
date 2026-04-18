@@ -433,7 +433,7 @@ function evaluate_recursive(y, wrk, node::Node{D,K,T}, dimshift, x) where {D,K,T
 
     # Compute the product across all the dimensions
     u = 1.0
-    for d in 1:D
+    @inbounds for d in 1:D
         u *= wrk[d]
     end
 
@@ -447,7 +447,7 @@ function evaluate_recursive(y, wrk, node::Node{D,K,T}, dimshift, x) where {D,K,T
     # Children are pre-linked via node.left / node.right so traversal
     # avoids Dict lookups entirely.
     if u > 0
-        for d in 1:D
+        @inbounds for d in 1:D
             kd = childsplit(node, x, d)
             if kd > 0
                 child = kd == 1 ? node.left[d] : node.right[d]
@@ -483,7 +483,7 @@ function evaluate_recursive(wrk, node::Node{D,K,T}, dimshift, x, k) where {D,K,T
 
     # Compute the product across all the dimensions
     u = 1.0
-    for d in 1:D
+    @inbounds for d in 1:D
         u *= wrk[d]
     end
 
@@ -492,9 +492,9 @@ function evaluate_recursive(wrk, node::Node{D,K,T}, dimshift, x, k) where {D,K,T
 
     # If the contribution of this node is nonzero (x lies in the support of
     # this basis function), continue checking its children via pre-linked
-    # child pointers (children[2d-1] = left in dim d, children[2d] = right).
+    # child pointers.
     if u > 0
-        for d in 1:D
+        @inbounds for d in 1:D
             kd = childsplit(node, x, d)
             if kd > 0
                 child = kd == 1 ? node.left[d] : node.right[d]
@@ -860,7 +860,7 @@ function integrate_recursive!(y, wrk, int::AdaptiveIntegral, node::Node{D,K,T},
 
     # Product across all dimensions
     u = 1.0
-    for d in 1:D
+    @inbounds for d in 1:D
         u *= wrk[d]
     end
 
@@ -871,7 +871,7 @@ function integrate_recursive!(y, wrk, int::AdaptiveIntegral, node::Node{D,K,T},
 
     # Recurse into children via pre-linked pointers.
     if u > 0
-        for d in 1:D
+        @inbounds for d in 1:D
             dd = in(d, int.dims)
             kd = dd ? 0 : childsplit(node, x, d)
 
