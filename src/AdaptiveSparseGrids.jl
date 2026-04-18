@@ -106,12 +106,10 @@ KTuple{N,T} = Union{NTuple{N,T},
 KTuple{N}   = KTuple{N,T} where T
 
 mutable struct Node{D,K,T<:KTuple{K}}
+    # --- Hot fields (accessed on every eval/integrate visit) ---
     α::T
     x::SVector{D, Float64}
-    fx::T
     l::NTuple{D, Int}
-    i::NTuple{D, Int}
-    depth::Int
     # Pre-linked children along each dimension. left[d] / right[d] hold
     # the left / right child in dimension d, or `nothing` if no such child
     # exists in the grid. Populated by link_to_parents! as nodes are
@@ -119,13 +117,17 @@ mutable struct Node{D,K,T<:KTuple{K}}
     # traversal avoids Dict lookups entirely.
     left::NTuple{D, Union{Nothing, Node{D,K,T}}}
     right::NTuple{D, Union{Nothing, Node{D,K,T}}}
+    # --- Cold fields (fit-only) ---
+    fx::T
+    i::NTuple{D, Int}
+    depth::Int
 
     function Node{D,K,T}(α::T, x::SVector{D,Float64}, fx::T,
                          l::NTuple{D,Int}, i::NTuple{D,Int},
                          depth::Int) where {D,K,T<:KTuple{K}}
         CT  = NTuple{D, Union{Nothing, Node{D,K,T}}}
         nils = CT(nothing for _ in 1:D)
-        return new{D,K,T}(α, x, fx, l, i, depth, nils, nils)
+        return new{D,K,T}(α, x, l, nils, nils, fx, i, depth)
     end
 end
 
