@@ -112,7 +112,27 @@ mutable struct Node{D,K,T<:KTuple{K}}
     l::NTuple{D, Int}
     i::NTuple{D, Int}
     depth::Int
+    # Pre-linked children along each dimension. left[d] / right[d] hold
+    # the left / right child in dimension d, or `nothing` if no such child
+    # exists in the grid. Populated by link_to_parents! as nodes are
+    # inserted; consumed by evaluate_recursive / integrate_recursive! so
+    # traversal avoids Dict lookups entirely.
+    left::NTuple{D, Union{Nothing, Node{D,K,T}}}
+    right::NTuple{D, Union{Nothing, Node{D,K,T}}}
+
+    function Node{D,K,T}(α::T, x::SVector{D,Float64}, fx::T,
+                         l::NTuple{D,Int}, i::NTuple{D,Int},
+                         depth::Int) where {D,K,T<:KTuple{K}}
+        CT  = NTuple{D, Union{Nothing, Node{D,K,T}}}
+        nils = CT(nothing for _ in 1:D)
+        return new{D,K,T}(α, x, fx, l, i, depth, nils, nils)
+    end
 end
+
+# Outer constructor so existing call sites don't need to know the
+# type parameters explicitly.
+Node(α::T, x::SVector{D,Float64}, fx::T, l::NTuple{D,Int}, i::NTuple{D,Int},
+     depth::Int) where {D,K,T<:KTuple{K}} = Node{D,K,T}(α, x, fx, l, i, depth)
 
 function Node(T::Type{S}, l, i) where {S <: KTuple}
     lt = Tuple(l)
@@ -371,9 +391,11 @@ function evaluate(fun::AdaptiveSparseGrid, x)
     evaluate!(y, fun, x)
 end
 
-evaluate(fun::AdaptiveSparseGrid, x, k)         = evaluate_recursive(makework(fun,x),    fun, base(fun), 1, x, k)
-evaluate!(y, fun::AdaptiveSparseGrid, x)        = evaluate_recursive(y, makework(fun,x), fun, base(fun), 1, x)
-evaluate!(y, wrk, fun::AdaptiveSparseGrid, x)   = evaluate_recursive(y, wrk, fun, base(fun), 1, x)
+evaluate(fun::AdaptiveSparseGrid, x, k)         = evaluate_recursive(makework(fun,x),    root(fun), 1, x, k)
+evaluate!(y, fun::AdaptiveSparseGrid, x)        = evaluate_recursive(y, makework(fun,x), root(fun), 1, x)
+evaluate!(y, wrk, fun::AdaptiveSparseGrid, x)   = evaluate_recursive(y, wrk, root(fun), 1, x)
+
+root(fun::AdaptiveSparseGrid) = fun.nodes[base(fun)]
 
 function makework(fun, x::AbstractVector)
     N = dims(fun,1)
@@ -387,21 +409,14 @@ function makework(fun, x)
     return @SVector ones(T, N)
 end
 
-function evaluate_recursive(y, wrk, fun::AdaptiveSparseGrid, idx::Index, dimshift, x)
-    # Dimensions of domain/codomain
-    N, K = dims(fun)
-
-    # Get the node that we're working on now
-    node  = fun.nodes[idx]
-    depth = node.depth
-
+function evaluate_recursive(y, wrk, node::Node{D,K,T}, dimshift, x) where {D,K,T}
     # We have stored the basis function evaluations for every dimension except
-    # dimshift 
-    wrk = setindex(wrk, ϕ(node, x, dimshift),   dimshift)
+    # dimshift
+    wrk = setindex(wrk, ϕ(node, x, dimshift), dimshift)
 
     # Compute the product across all the dimensions
     u = 1.0
-    for d in 1:N
+    for d in 1:D
         u *= wrk[d]
     end
 
@@ -410,31 +425,22 @@ function evaluate_recursive(y, wrk, fun::AdaptiveSparseGrid, idx::Index, dimshif
         y = setindex(y, y[k] + u * node.α[k], k)
     end
 
-    # If the contribution of this node is nonzero (i.e, x lies in the support of
-    # this basis function), then we continue checking all of it's children
+    # If the contribution of this node is nonzero (i.e, x lies in the support
+    # of this basis function), then we continue checking its children.
+    # Children are pre-linked via node.left / node.right so traversal
+    # avoids Dict lookups entirely.
     if u > 0
-        for d in 1:N
-
-            # Figure out which side we need to be on
+        for d in 1:D
             kd = childsplit(node, x, d)
-
-            # Calculate the index of the left or right child in dimension d
             if kd > 0
-                if kd == 1
-                    child = leftchild(idx, d)
-                else
-                    child = rightchild(idx, d)
-                end
-
-                # Check if that node is in the tree -- if it is, then descend into
-                # it
-                if haskey(fun.nodes, child)
-                    y = evaluate_recursive(y, wrk, fun, child, d, x)
+                child = kd == 1 ? node.left[d] : node.right[d]
+                if child !== nothing
+                    y = evaluate_recursive(y, wrk, child, d, x)
                 end
             end
 
-            # We descend through the nodes lexicographically
-            if idx[1][d] > 1
+            # Descend through the nodes lexicographically
+            if node.l[d] > 1
                 break
             end
         end
@@ -456,53 +462,34 @@ end
 get(x::KTuple, i::Int)      = x[i]
 get(x::KTuple, s::Symbol)   = getproperty(x, s)
 
-function evaluate_recursive(wrk, fun::AdaptiveSparseGrid, idx::Index, dimshift, x, k)
-    # Dimensions of domain/codomain
-    N, K = dims(fun)
-
-    # Get the node that we're working on now
-    node  = fun.nodes[idx]
-    depth = node.depth
-
+function evaluate_recursive(wrk, node::Node{D,K,T}, dimshift, x, k) where {D,K,T}
     # We have stored the basis function evaluations for every dimension except
-    # dimshift 
-    wrk = setindex(wrk, ϕ(node, x, dimshift),   dimshift)
+    # dimshift
+    wrk = setindex(wrk, ϕ(node, x, dimshift), dimshift)
 
     # Compute the product across all the dimensions
     u = 1.0
-    for d in 1:N 
+    for d in 1:D
         u *= wrk[d]
     end
 
-    # Add in the the contribution of this node to the running sum
+    # Add in the contribution of this node to the running sum
     y = u * get(node.α, k)
 
-    # If the contribution of this node is nonzero (i.e, x lies in the support of
-    # this basis function), then we continue checking all of it's children
+    # If the contribution of this node is nonzero (x lies in the support of
+    # this basis function), continue checking its children via pre-linked
+    # child pointers (children[2d-1] = left in dim d, children[2d] = right).
     if u > 0
-        for d in 1:N
-
-            # Figure out which side we need to be on
+        for d in 1:D
             kd = childsplit(node, x, d)
             if kd > 0
-
-                # Calculate the index of the left or right child in dimension d
-                if kd == 1
-                    child = leftchild(idx, d)
-                else
-                    child = rightchild(idx, d)
+                child = kd == 1 ? node.left[d] : node.right[d]
+                if child !== nothing
+                    y += evaluate_recursive(wrk, child, d, x, k)
                 end
-
-                # Check if that node is in the tree -- if it is, then descend into
-                # it
-                if haskey(fun.nodes, child)
-                    y += evaluate_recursive(wrk, fun, child, d, x, k)
-                end
-
             end
 
-            # We descend through the nodes lexicographically
-            if idx[1][d] > 1
+            if node.l[d] > 1
                 break
             end
         end
@@ -671,6 +658,48 @@ function drive_to_college!(fun, children)
     for child in children
         fun.nodes[Index(child.l, child.i)] = child
     end
+    link_to_parents!(fun, children)
+end
+
+"""
+Update each new child's parent node(s) so that the parent's `children`
+field points to this child in the appropriate slot. This maintains the
+invariant `evaluate_recursive` relies on: if a child exists in `fun.nodes`
+then its parent's corresponding `children` slot holds a reference to it
+(and the slot is `nothing` otherwise).
+"""
+function link_to_parents!(fun, new_children)
+    for c in new_children
+        D = length(c.l)
+        for d in 1:D
+            c.l[d] == 1 && continue
+            p_idx = parent(Index(c.l, c.i), d)
+            p = Base.get(fun.nodes, p_idx, nothing)
+            p === nothing && continue
+            p_l_d = p.l[d]; p_i_d = p.i[d]
+            lch_ld, lch_id = leftchild(p_l_d, p_i_d)
+            if (c.l[d], c.i[d]) == (lch_ld, lch_id)
+                _set_left!(p, d, c)
+            else
+                rch_ld, rch_id = rightchild(p_l_d, p_i_d)
+                if (c.l[d], c.i[d]) == (rch_ld, rch_id)
+                    _set_right!(p, d, c)
+                end
+            end
+        end
+    end
+end
+
+function _set_left!(p::Node{D,K,T}, d::Int, c::Node{D,K,T}) where {D,K,T}
+    old = p.left
+    p.left = ntuple(s -> s == d ? c : old[s], Val(D))
+    return
+end
+
+function _set_right!(p::Node{D,K,T}, d::Int, c::Node{D,K,T}) where {D,K,T}
+    old = p.right
+    p.right = ntuple(s -> s == d ? c : old[s], Val(D))
+    return
 end
 
 function addchildren!(children, node, d)
@@ -792,7 +821,7 @@ function integrate(int::AdaptiveIntegral, x)
     T    = promote_type(eltype(x), Float64)
     y    = @SVector zeros(T, dims(int.fun, 2))
     wrk  = makework(int.fun, x)
-    return integrate_recursive!(y, wrk, int, base(int.fun), 1, x)
+    return integrate_recursive!(y, wrk, int, root(int.fun), 1, x)
 end
 
 function scale(int::AdaptiveIntegral, x)
@@ -807,64 +836,40 @@ function scale(int::AdaptiveIntegral, x)
 end
 
 
-function integrate_recursive!(y, wrk, int::AdaptiveIntegral, idx::Index, dimshift, x)
-    # Dimensions of domain/codomain
-    fun  = int.fun
-    N, K = dims(fun)
-
-    # Get the node that we're working on now
-    @inbounds node  = fun.nodes[idx]
-    @inbounds depth = node.depth
-
-    # We have stored the basis function evaluations for every dimension except
-    # dimshift 
+function integrate_recursive!(y, wrk, int::AdaptiveIntegral, node::Node{D,K,T},
+                               dimshift, x) where {D,K,T}
+    # Integration dim? Use basis integral; else evaluate basis at x.
     newval = in(dimshift, int.dims) ?
-                I(node,dimshift)     :
+                I(node, dimshift)  :
                 ϕ(node, x, dimshift)
-    wrk = setindex(wrk, newval,   dimshift)
-    
-    # Compute the product across all the dimensions
+    wrk = setindex(wrk, newval, dimshift)
+
+    # Product across all dimensions
     u = 1.0
-    for d in 1:N
+    for d in 1:D
         u *= wrk[d]
     end
 
-    # Add in the the contribution of this node to the running sum
+    # Accumulate this node's contribution
     @inbounds @simd for k in 1:K
         y = setindex(y, y[k] + u * node.α[k], k)
     end
 
-    # If the contribution of this node is nonzero (i.e, x lies in the support of
-    # this basis function), then we continue checking all of it's children
+    # Recurse into children via pre-linked pointers.
     if u > 0
-        for d in 1:N
-
-            # Are we considering in an integration dimension
+        for d in 1:D
             dd = in(d, int.dims)
-
-            # If not, we can compute which side to split along
-            if !dd
-                kd = childsplit(node, x, d)
-            end
+            kd = dd ? 0 : childsplit(node, x, d)
 
             for split in 1:2
                 !dd && kd != split && continue
-
-                if split == 1
-                    child = leftchild(idx, d)
-                else
-                    child = rightchild(idx, d)
-                end
-
-                # Check if that node is in the tree -- if it is, then descend into
-                # it
-                if haskey(fun.nodes, child)
+                child = split == 1 ? node.left[d] : node.right[d]
+                if child !== nothing
                     y = integrate_recursive!(y, wrk, int, child, d, x)
                 end
             end
 
-            # We descend through the nodes lexicographically
-            if idx[1][d] > 1
+            if node.l[d] > 1
                 break
             end
         end
