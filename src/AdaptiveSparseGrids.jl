@@ -449,14 +449,11 @@ function evaluate_recursive(y, wrk, node::Node{D,K,T}, dimshift, x) where {D,K,T
     return y
 end
 
-function childsplit(n::Node, x, d; inclusive=false)
-    if n.x[d] > x[d] || inclusive && n.x[d] == x[d]
-        return 1
-    elseif n.x[d] < x[d]
-        return 2
-    else
-        return 0
-    end
+function childsplit(n::Node, x, d)
+    nxd = n.x[d]; xd = x[d]
+    nxd > xd && return 1
+    nxd < xd && return 2
+    return 0
 end
 
 get(x::KTuple, i::Int)      = x[i]
