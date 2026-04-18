@@ -49,8 +49,14 @@ function main()
     println("AdaptiveSparseGrids.jl — compare")
     println("threads=", Threads.nthreads(), "  julia=", VERSION, "  bench=", basename(@__FILE__))
     println()
-    header = @sprintf("%-12s | %6s | %8s | %11s | %10s | %10s",
-                      "workload", "N", "nodes", "eval (1 pt)", "bulk Mcalls/s", "visits/call")
+    nthreads = Threads.nthreads()
+    header = nthreads > 1 ?
+        @sprintf("%-12s | %6s | %8s | %11s | %10s | %12s | %8s",
+                 "workload", "N", "nodes", "eval (1 pt)", "bulk ser.",
+                 "bulk par.", "visits") :
+        @sprintf("%-12s | %6s | %8s | %11s | %10s | %8s",
+                 "workload", "N", "nodes", "eval (1 pt)", "bulk ser.",
+                 "visits")
     println(header)
     println("-" ^ length(header))
 
@@ -64,21 +70,37 @@ function main()
         # Single-point eval (1 of the 5_000 points, median over many reps)
         b = @benchmark $fun($(pts[1])) samples=200 evals=5 seconds=2
 
-        # Bulk throughput: time 5000 calls once (after warmup).
-        # Report median of 3 runs to smooth jitter.
+        # Bulk serial throughput (Mcalls/s)
         ts = Float64[]
         for _ in 1:3
             t = @elapsed for x in pts; fun(x); end
             push!(ts, t)
         end
-        sort!(ts); tmed = ts[2]
-        mcalls = length(pts) / tmed / 1e6
+        sort!(ts); tser = ts[2]
+        mser = length(pts) / tser / 1e6
 
         visits = count_visits(fun, pts[1])
 
-        println(@sprintf("%-12s | %6d | %8d | %11s | %13.2f | %10d",
-                          string(name), N, length(fun), fmt_ns(minimum(b.times)),
-                          mcalls, visits))
+        if nthreads > 1
+            # Bulk parallel throughput via evaluate!(ys, fun, xs)
+            ys = Vector{Float64}(undef, length(pts))
+            AdaptiveSparseGrids.evaluate!(ys, fun, pts)  # warmup
+            tp = Float64[]
+            for _ in 1:3
+                t = @elapsed AdaptiveSparseGrids.evaluate!(ys, fun, pts)
+                push!(tp, t)
+            end
+            sort!(tp); tpar = tp[2]
+            mpar = length(pts) / tpar / 1e6
+
+            println(@sprintf("%-12s | %6d | %8d | %11s | %10.2f | %12.2f | %8d",
+                              string(name), N, length(fun),
+                              fmt_ns(minimum(b.times)), mser, mpar, visits))
+        else
+            println(@sprintf("%-12s | %6d | %8d | %11s | %10.2f | %8d",
+                              string(name), N, length(fun),
+                              fmt_ns(minimum(b.times)), mser, visits))
+        end
     end
 end
 

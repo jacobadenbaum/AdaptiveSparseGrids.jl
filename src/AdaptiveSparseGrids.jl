@@ -397,6 +397,23 @@ evaluate!(y, wrk, fun::AdaptiveSparseGrid, x)   = evaluate_recursive(y, wrk, roo
 
 root(fun::AdaptiveSparseGrid) = fun.nodes[base(fun)]
 
+"""
+    evaluate!(ys, fun, xs)
+
+Evaluate `fun` at each point in `xs` in parallel, writing `fun(xs[i])` to
+`ys[i]`. Traversal only reads from the grid, so it's safe to call across
+threads once `fun` has been trained.
+"""
+function evaluate!(ys::AbstractVector, fun::AdaptiveSparseGrid,
+                   xs::AbstractVector{<:Union{AbstractVector, Tuple}})
+    length(ys) == length(xs) || throw(DimensionMismatch(
+        "length(ys) = $(length(ys)) ≠ length(xs) = $(length(xs))"))
+    Threads.@threads for i in eachindex(xs)
+        @inbounds ys[i] = fun(xs[i])
+    end
+    return ys
+end
+
 function makework(fun, x::AbstractVector)
     N = dims(fun,1)
     T = promote_type(Float64, eltype(x))
