@@ -441,8 +441,123 @@ function evaluate!(ys::AbstractVector, fun::AdaptiveSparseGrid,
                    xs::AbstractVector{<:Union{AbstractVector, Tuple}})
     length(ys) == length(xs) || throw(DimensionMismatch(
         "length(ys) = $(length(ys)) ≠ length(xs) = $(length(xs))"))
+    _bulk_evaluate!(ys, fun, xs)
+    return ys
+end
+
+# For scalar-codomain grids (K = 1) we run a single batch-coherent tree walk
+# that shares every node load across the whole point cloud. For multi-codomain
+# we fall back to a point-parallel walk (still thread-parallel, but one
+# traversal per point).
+_bulk_evaluate!(ys, fun::AdaptiveSparseGrid{N,1}, xs) where {N} =
+    _bulk_evaluate_batched!(ys, fun, xs)
+
+function _bulk_evaluate!(ys, fun::AdaptiveSparseGrid, xs)
     Threads.@threads for i in eachindex(xs)
         @inbounds ys[i] = fun(xs[i])
+    end
+    return ys
+end
+
+function _bulk_evaluate_batched!(ys, fun::AdaptiveSparseGrid{N,1,L,T},
+                                  xs) where {N,L,T}
+    M = length(xs)
+    M == 0 && return ys
+    fill!(ys, zero(eltype(ys)))
+
+    nth = max(1, Threads.nthreads())
+    chunk = cld(M, nth)
+
+    Threads.@threads for t in 1:nth
+        lo = (t-1)*chunk + 1
+        hi = min(M, t*chunk)
+        lo > hi && continue
+        L_chunk = hi - lo + 1
+        xs_scaled = [scale(fun, xs[i]) for i in lo:hi]
+        wrk       = ones(Float64, N, L_chunk)
+        subset    = collect(Int32(1):Int32(L_chunk))
+        saved     = Float64[]
+        left_buf  = Int32[]
+        right_buf = Int32[]
+        vys       = view(ys, lo:hi)
+        @inbounds _batch_recurse!(vys, wrk, fun._eval, fun._eval[1],
+                                   1, xs_scaled, subset,
+                                   saved, left_buf, right_buf)
+    end
+    return ys
+end
+
+# In-place batch recursion. `subset` holds 1-based Int32 indices into `xs`
+# (and `wrk`'s columns). `dimshift` is the dimension whose basis value is new
+# at this node relative to its parent; `wrk`'s other rows are valid for every
+# active point already. `saved`, `left_buf`, `right_buf` are per-thread
+# reusable scratch buffers — resized but never freshly allocated inside the
+# recursion. Partition subsets are copied once per recursion to isolate the
+# shared `left_buf`/`right_buf` state across sibling recursions.
+function _batch_recurse!(ys, wrk::Matrix{Float64},
+                         arr::Vector{EvalNode{D,K,T}},
+                         node::EvalNode{D,K,T}, dimshift::Int,
+                         xs, subset::AbstractVector{Int32},
+                         saved::Vector{Float64},
+                         left_buf::Vector{Int32},
+                         right_buf::Vector{Int32}) where {D,K,T}
+    isempty(subset) && return ys
+
+    l_ds = node.l[dimshift]; i_ds = node.i[dimshift]
+    α1 = node.α[1]
+    nsub = length(subset)
+
+    # Save the parent's wrk[dimshift, i] for restoration later (wrk is shared
+    # across sibling subtrees), then write this node's basis value.
+    resize!(saved, nsub)
+    @inbounds for (k, i) in pairs(subset)
+        saved[k] = wrk[dimshift, i]
+        wrk[dimshift, i] = ϕ(l_ds, i_ds, xs[i][dimshift])
+    end
+
+    # u[i] = prod_d wrk[d, i]; ys[i] += u * α
+    @inbounds for i in subset
+        u = 1.0
+        for d in 1:D
+            u *= wrk[d, i]
+        end
+        if u > 0
+            ys[i] += u * α1
+        end
+    end
+
+    @inbounds for d in 1:D
+        lc, rc = node.left[d], node.right[d]
+        if lc != Int32(0) || rc != Int32(0)
+            empty!(left_buf); empty!(right_buf)
+            nxd = node.x[d]
+            for i in subset
+                xd = xs[i][d]
+                if xd < nxd
+                    push!(left_buf, i)
+                elseif xd > nxd
+                    push!(right_buf, i)
+                end
+            end
+            # Copies isolate each child's view of the subset: the child
+            # recursion reuses left_buf / right_buf for its own partitioning.
+            if lc != Int32(0) && !isempty(left_buf)
+                l_copy = copy(left_buf)
+                _batch_recurse!(ys, wrk, arr, arr[lc], d, xs, l_copy,
+                                 saved, left_buf, right_buf)
+            end
+            if rc != Int32(0) && !isempty(right_buf)
+                r_copy = copy(right_buf)
+                _batch_recurse!(ys, wrk, arr, arr[rc], d, xs, r_copy,
+                                 saved, left_buf, right_buf)
+            end
+        end
+        node.l[d] > 1 && break
+    end
+
+    # Restore parent's wrk[dimshift, i] for sibling descents.
+    @inbounds for (k, i) in pairs(subset)
+        wrk[dimshift, i] = saved[k]
     end
     return ys
 end
