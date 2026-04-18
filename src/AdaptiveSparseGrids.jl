@@ -159,6 +159,23 @@ end
 Node(T::KTuple, l, i) = Node(typeof(T), l, i)
 Node(l, i)            = Node(Tuple{Float64}, l, i)
 
+# Dense, bits-typed snapshot of a Node for the evaluation hot path.
+# Built from Node by sync_eval! and stored in a contiguous Vector on the
+# grid. Child links are 1-based Int32 indices into that Vector (0 means
+# no child along that dimension).
+#
+# Cold metadata (fx, depth) stays on the mutable Node used during fit!;
+# EvalNode holds only what evaluate_recursive / integrate_recursive!
+# actually read.
+struct EvalNode{D, K, T<:KTuple{K}}
+    α::T
+    x::SVector{D, Float64}
+    l::NTuple{D, Int}
+    i::NTuple{D, Int}
+    left::NTuple{D, Int32}
+    right::NTuple{D, Int32}
+end
+
 getx(n::Node) = n.x
 getT(::Node{N,K,T}) where {N,K,T} = T
 dims(fun::Node{N,K,T}) where {N,K,T} = (N, K)
@@ -192,7 +209,8 @@ function rightchild(idx::Int, p::Node{D,K}, d) where {D, K}
                 (p.i[1:d-1]..., ic, p.i[d+1:end]...))
 end
 
-ϕ(p::Node, x, d) = ϕ(p.l[d], p.i[d], x[d])
+ϕ(p::Node,     x, d) = ϕ(p.l[d], p.i[d], x[d])
+ϕ(p::EvalNode, x, d) = ϕ(p.l[d], p.i[d], x[d])
 
 function ϕ(p::Node, x)
     D, K = dims(p)
@@ -264,11 +282,23 @@ for f in [:leftchild, :rightchild, :parent]
     end
 end
 
-mutable struct AdaptiveSparseGrid{N, K, L, T} 
+mutable struct AdaptiveSparseGrid{N, K, L, T}
     nodes::Dict{Index{N}, Node{N, K, T}}
     bounds::SMatrix{N, 2, Float64, L}
     depth::Int
     max_depth::Int
+    # Flat eval view. Slot 1 is always the root. Kept in sync with `nodes`
+    # by `sync_eval!`, which runs after every `drive_to_college!`.
+    _eval::Vector{EvalNode{N, K, T}}
+    _id::Dict{Index{N}, Int32}
+end
+
+function AdaptiveSparseGrid(nodes::Dict{Index{N}, Node{N,K,T}}, bounds::SMatrix{N,2,Float64,L},
+                             depth::Int, max_depth::Int) where {N,K,L,T}
+    fun = AdaptiveSparseGrid{N,K,L,T}(nodes, bounds, depth, max_depth,
+                                       EvalNode{N,K,T}[], Dict{Index{N}, Int32}())
+    sync_eval!(fun)
+    return fun
 end
 
 getT(::AdaptiveSparseGrid{N,K,L,T}) where {N,K,L,T} = T
@@ -393,11 +423,12 @@ function evaluate(fun::AdaptiveSparseGrid, x)
     evaluate!(y, fun, x)
 end
 
-evaluate(fun::AdaptiveSparseGrid, x, k)         = evaluate_recursive(makework(fun,x),    root(fun), 1, x, k)
-evaluate!(y, fun::AdaptiveSparseGrid, x)        = evaluate_recursive(y, makework(fun,x), root(fun), 1, x)
-evaluate!(y, wrk, fun::AdaptiveSparseGrid, x)   = evaluate_recursive(y, wrk, root(fun), 1, x)
+evaluate(fun::AdaptiveSparseGrid, x, k)         = evaluate_recursive(makework(fun,x),    fun._eval, root(fun), 1, x, k)
+evaluate!(y, fun::AdaptiveSparseGrid, x)        = evaluate_recursive(y, makework(fun,x), fun._eval, root(fun), 1, x)
+evaluate!(y, wrk, fun::AdaptiveSparseGrid, x)   = evaluate_recursive(y, wrk,             fun._eval, root(fun), 1, x)
 
-root(fun::AdaptiveSparseGrid) = fun.nodes[base(fun)]
+# Root EvalNode lives in slot 1 of _eval (invariant maintained by sync_eval!).
+@inline root(fun::AdaptiveSparseGrid) = @inbounds fun._eval[1]
 
 """
     evaluate!(ys, fun, xs)
@@ -428,7 +459,8 @@ function makework(fun, x)
     return @SVector ones(T, N)
 end
 
-function evaluate_recursive(y, wrk, node::Node{D,K,T}, dimshift, x) where {D,K,T}
+function evaluate_recursive(y, wrk, arr::Vector{EvalNode{D,K,T}},
+                             node::EvalNode{D,K,T}, dimshift, x) where {D,K,T}
     # We have stored the basis function evaluations for every dimension except
     # dimshift
     wrk = setindex(wrk, ϕ(node, x, dimshift), dimshift)
@@ -444,17 +476,15 @@ function evaluate_recursive(y, wrk, node::Node{D,K,T}, dimshift, x) where {D,K,T
         y = setindex(y, y[k] + u * node.α[k], k)
     end
 
-    # If the contribution of this node is nonzero (i.e, x lies in the support
-    # of this basis function), then we continue checking its children.
-    # Children are pre-linked via node.left / node.right so traversal
-    # avoids Dict lookups entirely.
+    # Descend into children via Int32 indices into the flat array.
+    # A child id of 0 means no child along that side/dimension.
     if u > 0
         @inbounds for d in 1:D
             kd = childsplit(node, x, d)
             if kd > 0
-                child = kd == 1 ? node.left[d] : node.right[d]
-                if child !== nothing
-                    y = evaluate_recursive(y, wrk, child, d, x)
+                cid = kd == 1 ? node.left[d] : node.right[d]
+                if cid != Int32(0)
+                    y = evaluate_recursive(y, wrk, arr, arr[cid], d, x)
                 end
             end
 
@@ -475,33 +505,34 @@ function childsplit(n::Node, x, d)
     return 0
 end
 
+function childsplit(n::EvalNode, x, d)
+    nxd = n.x[d]; xd = x[d]
+    nxd > xd && return 1
+    nxd < xd && return 2
+    return 0
+end
+
 get(x::KTuple, i::Int)      = x[i]
 get(x::KTuple, s::Symbol)   = getproperty(x, s)
 
-function evaluate_recursive(wrk, node::Node{D,K,T}, dimshift, x, k) where {D,K,T}
-    # We have stored the basis function evaluations for every dimension except
-    # dimshift
+function evaluate_recursive(wrk, arr::Vector{EvalNode{D,K,T}},
+                             node::EvalNode{D,K,T}, dimshift, x, k) where {D,K,T}
     wrk = setindex(wrk, ϕ(node, x, dimshift), dimshift)
 
-    # Compute the product across all the dimensions
     u = 1.0
     @inbounds for d in 1:D
         u *= wrk[d]
     end
 
-    # Add in the contribution of this node to the running sum
     y = u * get(node.α, k)
 
-    # If the contribution of this node is nonzero (x lies in the support of
-    # this basis function), continue checking its children via pre-linked
-    # child pointers.
     if u > 0
         @inbounds for d in 1:D
             kd = childsplit(node, x, d)
             if kd > 0
-                child = kd == 1 ? node.left[d] : node.right[d]
-                if child !== nothing
-                    y += evaluate_recursive(wrk, child, d, x, k)
+                cid = kd == 1 ? node.left[d] : node.right[d]
+                if cid != Int32(0)
+                    y += evaluate_recursive(wrk, arr, arr[cid], d, x, k)
                 end
             end
 
@@ -521,6 +552,10 @@ end
 function fit!(f, fun::AdaptiveSparseGrid; kwargs...)
     # We need to evaluate f on the base node
     train!(f, fun, collect(values(fun.nodes)))
+    # The root node was already in fun.nodes before fit!, so drive_to_college!
+    # (which is the normal sync point) never fired for it. Capture its
+    # freshly-trained α in the flat _eval view before the first refine step.
+    sync_eval!(fun)
 
     while true
         n = refinegrid!(f, fun; kwargs...)
@@ -675,7 +710,44 @@ function drive_to_college!(fun, children)
         fun.nodes[Index(child.l, child.i)] = child
     end
     link_to_parents!(fun, children)
+    sync_eval!(fun)
 end
+
+"""
+Rebuild the flat `_eval` vector from the current mutable `nodes` Dict.
+Slot 1 always holds the root (the all-ones Index). This is invoked after
+every `drive_to_college!` so subsequent `evaluate` calls (used inside
+`train!` to compute the current approximation at new points) see an
+up-to-date eval view.
+"""
+function sync_eval!(fun::AdaptiveSparseGrid{N,K,L,T}) where {N,K,L,T}
+    isempty(fun.nodes) && (empty!(fun._eval); empty!(fun._id); return fun)
+
+    # Assign stable positions: root → 1, then the rest in Dict order.
+    empty!(fun._id); sizehint!(fun._id, length(fun.nodes))
+    root_idx = base(fun)
+    fun._id[root_idx] = Int32(1)
+    next::Int32 = 2
+    for idx in keys(fun.nodes)
+        idx == root_idx && continue
+        fun._id[idx] = next
+        next += Int32(1)
+    end
+
+    resize!(fun._eval, length(fun.nodes))
+    for (idx, n) in fun.nodes
+        id = fun._id[idx]
+        fun._eval[id] = EvalNode{N,K,T}(
+            n.α, n.x, n.l, n.i,
+            ntuple(d -> _eval_child_id(fun._id, n.left[d]),  Val(N)),
+            ntuple(d -> _eval_child_id(fun._id, n.right[d]), Val(N)),
+        )
+    end
+    return fun
+end
+
+_eval_child_id(::Dict, ::Nothing) = Int32(0)
+_eval_child_id(id::Dict, n::Node) = Base.get(id, Index(n.l, n.i), Int32(0))
 
 """
 Update each new child's parent node(s) so that the parent's `children`
@@ -837,7 +909,7 @@ function integrate(int::AdaptiveIntegral, x)
     T    = promote_type(eltype(x), Float64)
     y    = @SVector zeros(T, dims(int.fun, 2))
     wrk  = makework(int.fun, x)
-    return integrate_recursive!(y, wrk, int, root(int.fun), 1, x)
+    return integrate_recursive!(y, wrk, int, int.fun._eval, root(int.fun), 1, x)
 end
 
 function scale(int::AdaptiveIntegral, x)
@@ -852,7 +924,9 @@ function scale(int::AdaptiveIntegral, x)
 end
 
 
-function integrate_recursive!(y, wrk, int::AdaptiveIntegral, node::Node{D,K,T},
+function integrate_recursive!(y, wrk, int::AdaptiveIntegral,
+                               arr::Vector{EvalNode{D,K,T}},
+                               node::EvalNode{D,K,T},
                                dimshift, x) where {D,K,T}
     # Integration dim? Use basis integral; else evaluate basis at x.
     newval = in(dimshift, int.dims) ?
@@ -860,18 +934,15 @@ function integrate_recursive!(y, wrk, int::AdaptiveIntegral, node::Node{D,K,T},
                 ϕ(node, x, dimshift)
     wrk = setindex(wrk, newval, dimshift)
 
-    # Product across all dimensions
     u = 1.0
     @inbounds for d in 1:D
         u *= wrk[d]
     end
 
-    # Accumulate this node's contribution
     @inbounds @simd for k in 1:K
         y = setindex(y, y[k] + u * node.α[k], k)
     end
 
-    # Recurse into children via pre-linked pointers.
     if u > 0
         @inbounds for d in 1:D
             dd = in(d, int.dims)
@@ -879,9 +950,9 @@ function integrate_recursive!(y, wrk, int::AdaptiveIntegral, node::Node{D,K,T},
 
             for split in 1:2
                 !dd && kd != split && continue
-                child = split == 1 ? node.left[d] : node.right[d]
-                if child !== nothing
-                    y = integrate_recursive!(y, wrk, int, child, d, x)
+                cid = split == 1 ? node.left[d] : node.right[d]
+                if cid != Int32(0)
+                    y = integrate_recursive!(y, wrk, int, arr, arr[cid], d, x)
                 end
             end
 
@@ -901,7 +972,8 @@ function I(l)
     throw(ArgumentError("l must be positive"))
 end
 
-I(n::Node, d) = I(n.l[d])
+I(n::Node,     d) = I(n.l[d])
+I(n::EvalNode, d) = I(n.l[d])
 ################################################################################
 ##################### Helper Utilities #########################################
 ################################################################################
