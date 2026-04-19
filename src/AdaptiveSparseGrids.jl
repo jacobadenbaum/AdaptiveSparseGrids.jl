@@ -18,6 +18,11 @@ function m(i::Int)
     throw(ArgumentError("i must be a nonnegative integer.  You passed $i"))
 end
 
+# Unchecked hot-path variant. Only valid for i >= 1; used by ϕ / I on
+# grid nodes where `l[d]` is always >= 1. Dropping the throw branch
+# lets LLVM eliminate the GC-frame setup inside evaluate_recursive.
+@inline _m(i::Int) = i > 1 ? (2 << (i-2)) : 1
+
 function Y(i::Int,j::Int)
     # Recover the dimension of the ith layer
     mi = m(i)
@@ -51,13 +56,20 @@ function Dϕ(x::Real)
 end
 
 
-function ϕ(i,j,x)
-    i > 2               && return ϕ(x*m(i) - j)
-    i == 2 && j == 0    && return 0.0 <= x <= 0.5 ?  1 - 2 * x : 0.0
-    i == 2 && j == 2    && return 0.5 <= x <= 1   ?  2 * x - 1 : 0.0
-    i == 2 && j == 1    && return ϕ(2*x - 1)
-    i == 1              && return 0.0 <= x <= 1   ? 1.0 : 0.0
-    throw(ArgumentError("i=$i, j=$j are not valid indices"))
+@inline function ϕ(i, j, x)
+    # No throw path: LLVM would otherwise emit a GC frame for the
+    # ArgumentError string interpolation even though the branch is
+    # unreachable with well-formed (l, i) on the grid. Only call
+    # with a valid (i, j) pair; this is internal.
+    if i > 2
+        return ϕ(x*_m(i) - j)
+    elseif i == 2
+        j == 0 && return 0.0 <= x <= 0.5 ? 1 - 2*x : 0.0
+        j == 2 && return 0.5 <= x <= 1   ? 2*x - 1 : 0.0
+        return ϕ(2*x - 1)            # j == 1
+    else                             # i == 1
+        return 0.0 <= x <= 1 ? 1.0 : 0.0
+    end
 end
 
 ϕ(i::Int, j::Int) = x -> ϕ(i,j,x)
@@ -106,13 +118,35 @@ KTuple{N,T} = Union{NTuple{N,T},
 KTuple{N}   = KTuple{N,T} where T
 
 mutable struct Node{D,K,T<:KTuple{K}}
+    # --- Hot fields (accessed on every eval/integrate visit) ---
     α::T
     x::SVector{D, Float64}
-    fx::T
     l::NTuple{D, Int}
+    # Pre-linked children along each dimension. left[d] / right[d] hold
+    # the left / right child in dimension d, or `nothing` if no such child
+    # exists in the grid. Populated by link_to_parents! as nodes are
+    # inserted; consumed by evaluate_recursive / integrate_recursive! so
+    # traversal avoids Dict lookups entirely.
+    left::NTuple{D, Union{Nothing, Node{D,K,T}}}
+    right::NTuple{D, Union{Nothing, Node{D,K,T}}}
+    # --- Cold fields (fit-only) ---
+    fx::T
     i::NTuple{D, Int}
     depth::Int
+
+    function Node{D,K,T}(α::T, x::SVector{D,Float64}, fx::T,
+                         l::NTuple{D,Int}, i::NTuple{D,Int},
+                         depth::Int) where {D,K,T<:KTuple{K}}
+        CT  = NTuple{D, Union{Nothing, Node{D,K,T}}}
+        nils = CT(nothing for _ in 1:D)
+        return new{D,K,T}(α, x, l, nils, nils, fx, i, depth)
+    end
 end
+
+# Outer constructor so existing call sites don't need to know the
+# type parameters explicitly.
+Node(α::T, x::SVector{D,Float64}, fx::T, l::NTuple{D,Int}, i::NTuple{D,Int},
+     depth::Int) where {D,K,T<:KTuple{K}} = Node{D,K,T}(α, x, fx, l, i, depth)
 
 function Node(T::Type{S}, l, i) where {S <: KTuple}
     lt = Tuple(l)
@@ -136,6 +170,23 @@ end
 
 Node(T::KTuple, l, i) = Node(typeof(T), l, i)
 Node(l, i)            = Node(Tuple{Float64}, l, i)
+
+# Dense, bits-typed snapshot of a Node for the evaluation hot path.
+# Built from Node by sync_eval! and stored in a contiguous Vector on the
+# grid. Child links are 1-based Int32 indices into that Vector (0 means
+# no child along that dimension).
+#
+# Cold metadata (fx, depth) stays on the mutable Node used during fit!;
+# EvalNode holds only what evaluate_recursive / integrate_recursive!
+# actually read.
+struct EvalNode{D, K, T<:KTuple{K}}
+    α::T
+    x::SVector{D, Float64}
+    l::NTuple{D, Int}
+    i::NTuple{D, Int}
+    left::NTuple{D, Int32}
+    right::NTuple{D, Int32}
+end
 
 getx(n::Node) = n.x
 getT(::Node{N,K,T}) where {N,K,T} = T
@@ -170,7 +221,8 @@ function rightchild(idx::Int, p::Node{D,K}, d) where {D, K}
                 (p.i[1:d-1]..., ic, p.i[d+1:end]...))
 end
 
-ϕ(p::Node, x, d) = ϕ(p.l[d], p.i[d], x[d])
+@inline ϕ(p::Node,     x, d) = @inbounds ϕ(p.l[d], p.i[d], x[d])
+@inline ϕ(p::EvalNode, x, d) = @inbounds ϕ(p.l[d], p.i[d], x[d])
 
 function ϕ(p::Node, x)
     D, K = dims(p)
@@ -242,11 +294,23 @@ for f in [:leftchild, :rightchild, :parent]
     end
 end
 
-mutable struct AdaptiveSparseGrid{N, K, L, T} 
+mutable struct AdaptiveSparseGrid{N, K, L, T}
     nodes::Dict{Index{N}, Node{N, K, T}}
     bounds::SMatrix{N, 2, Float64, L}
     depth::Int
     max_depth::Int
+    # Flat eval view. Slot 1 is always the root. Kept in sync with `nodes`
+    # by `sync_eval!`, which runs after every `drive_to_college!`.
+    _eval::Vector{EvalNode{N, K, T}}
+    _id::Dict{Index{N}, Int32}
+end
+
+function AdaptiveSparseGrid(nodes::Dict{Index{N}, Node{N,K,T}}, bounds::SMatrix{N,2,Float64,L},
+                             depth::Int, max_depth::Int) where {N,K,L,T}
+    fun = AdaptiveSparseGrid{N,K,L,T}(nodes, bounds, depth, max_depth,
+                                       EvalNode{N,K,T}[], Dict{Index{N}, Int32}())
+    sync_eval!(fun)
+    return fun
 end
 
 getT(::AdaptiveSparseGrid{N,K,L,T}) where {N,K,L,T} = T
@@ -371,9 +435,178 @@ function evaluate(fun::AdaptiveSparseGrid, x)
     evaluate!(y, fun, x)
 end
 
-evaluate(fun::AdaptiveSparseGrid, x, k)         = evaluate_recursive(makework(fun,x),    fun, base(fun), 1, x, k)
-evaluate!(y, fun::AdaptiveSparseGrid, x)        = evaluate_recursive(y, makework(fun,x), fun, base(fun), 1, x)
-evaluate!(y, wrk, fun::AdaptiveSparseGrid, x)   = evaluate_recursive(y, wrk, fun, base(fun), 1, x)
+evaluate(fun::AdaptiveSparseGrid, x, k)         = evaluate_recursive(makework(fun,x),    fun._eval, root(fun), 1, x, k)
+evaluate!(y, fun::AdaptiveSparseGrid, x)        = evaluate_recursive(y, makework(fun,x), fun._eval, root(fun), 1, x)
+evaluate!(y, wrk, fun::AdaptiveSparseGrid, x)   = evaluate_recursive(y, wrk,             fun._eval, root(fun), 1, x)
+
+# Root EvalNode lives in slot 1 of _eval (invariant maintained by sync_eval!).
+@inline root(fun::AdaptiveSparseGrid) = @inbounds fun._eval[1]
+
+"""
+    evaluate!(ys, fun, xs)
+
+Evaluate `fun` at each point in `xs` in parallel, writing `fun(xs[i])` to
+`ys[i]`. Traversal is read-only on the grid, so concurrent calls from
+multiple threads are safe. Do **not** call while the grid is being
+mutated (fit/refine) — `drive_to_college!` and `sync_eval!` write
+`fun.nodes` and `fun._eval`, which would race with the reading traversal.
+"""
+function evaluate!(ys::AbstractVector, fun::AdaptiveSparseGrid,
+                   xs::AbstractVector{<:Union{AbstractVector, Tuple}})
+    length(ys) == length(xs) || throw(DimensionMismatch(
+        "length(ys) = $(length(ys)) ≠ length(xs) = $(length(xs))"))
+    _bulk_evaluate!(ys, fun, xs)
+    return ys
+end
+
+# For scalar-codomain grids (K = 1) we run a single batch-coherent tree walk
+# that shares every node load across the whole point cloud. For multi-codomain
+# we fall back to a point-parallel walk (still thread-parallel, but one
+# traversal per point).
+_bulk_evaluate!(ys, fun::AdaptiveSparseGrid{N,1}, xs) where {N} =
+    _bulk_evaluate_batched!(ys, fun, xs)
+
+function _bulk_evaluate!(ys, fun::AdaptiveSparseGrid, xs)
+    Threads.@threads for i in eachindex(xs)
+        @inbounds ys[i] = fun(xs[i])
+    end
+    return ys
+end
+
+# `nchunks` and `threaded` are internal knobs so tests can exercise the
+# chunk-boundary logic and the Threads.@threads path independently of the
+# Julia process's nthreads setting. Defaults preserve the public behavior
+# (chunk into `Threads.nthreads()` partitions and dispatch via @threads).
+function _bulk_evaluate_batched!(ys, fun::AdaptiveSparseGrid{N,1,L,T},
+                                  xs;
+                                  nchunks::Int = max(1, Threads.nthreads()),
+                                  threaded::Bool = true) where {N,L,T}
+    M = length(xs)
+    M == 0 && return ys
+    fill!(ys, zero(eltype(ys)))
+
+    nch = max(1, nchunks)
+    chunk = cld(M, nch)
+
+    if threaded
+        Threads.@threads for t in 1:nch
+            _bulk_batched_chunk!(ys, fun, xs, t, chunk, M)
+        end
+    else
+        for t in 1:nch
+            _bulk_batched_chunk!(ys, fun, xs, t, chunk, M)
+        end
+    end
+    return ys
+end
+
+function _bulk_batched_chunk!(ys, fun::AdaptiveSparseGrid{N,1,L,T}, xs,
+                               t::Int, chunk::Int, M::Int) where {N,L,T}
+    lo = (t-1)*chunk + 1
+    hi = min(M, t*chunk)
+    lo > hi && return nothing
+    L_chunk = hi - lo + 1
+    xs_scaled = [scale(fun, xs[i]) for i in lo:hi]
+    wrk       = ones(Float64, N, L_chunk)
+    subset    = collect(Int32(1):Int32(L_chunk))
+    saved     = Float64[]
+    left_buf  = Int32[]
+    right_buf = Int32[]
+    vys       = view(ys, lo:hi)
+    @inbounds _batch_recurse!(vys, wrk, fun._eval, fun._eval[1],
+                               1, xs_scaled, subset,
+                               saved, left_buf, right_buf)
+    return nothing
+end
+
+# In-place batch recursion. `subset` holds 1-based Int32 indices into `xs`
+# (and `wrk`'s columns). `dimshift` is the dimension whose basis value is new
+# at this node relative to its parent; `wrk`'s other rows are valid for every
+# active point already. `saved`, `left_buf`, `right_buf` are per-thread
+# reusable scratch buffers — resized but never freshly allocated inside the
+# recursion. `saved` is used as a stack: each frame pushes its snapshot at the
+# tail on entry and pops it on return, so child frames can't clobber the
+# parent's restore data. Partition subsets are copied once per recursion to
+# isolate the shared `left_buf`/`right_buf` state across sibling recursions.
+function _batch_recurse!(ys, wrk::Matrix{Float64},
+                         arr::Vector{EvalNode{D,K,T}},
+                         node::EvalNode{D,K,T}, dimshift::Int,
+                         xs, subset::AbstractVector{Int32},
+                         saved::Vector{Float64},
+                         left_buf::Vector{Int32},
+                         right_buf::Vector{Int32}) where {D,K,T}
+    isempty(subset) && return ys
+
+    l_ds = node.l[dimshift]; i_ds = node.i[dimshift]
+    α1 = node.α[1]
+    nsub = length(subset)
+
+    # Push this frame's snapshot of wrk[dimshift, i] at the tail of `saved`
+    # (used as a stack), then write this node's basis value.
+    save_off = length(saved)
+    resize!(saved, save_off + nsub)
+    @inbounds for (k, i) in pairs(subset)
+        saved[save_off + k] = wrk[dimshift, i]
+        wrk[dimshift, i] = ϕ(l_ds, i_ds, xs[i][dimshift])
+    end
+
+    # u[i] = prod_d wrk[d, i]; ys[i] += u * α
+    @inbounds for i in subset
+        u = 1.0
+        for d in 1:D
+            u *= wrk[d, i]
+        end
+        if u > 0
+            ys[i] += u * α1
+        end
+    end
+
+    @inbounds for d in 1:D
+        lc, rc = node.left[d], node.right[d]
+        if lc != Int32(0) || rc != Int32(0)
+            empty!(left_buf); empty!(right_buf)
+            nxd = node.x[d]
+            for i in subset
+                xd = xs[i][d]
+                if xd < nxd
+                    push!(left_buf, i)
+                elseif xd > nxd
+                    push!(right_buf, i)
+                end
+            end
+            # Snapshot BOTH child subsets before any recursion. left_buf and
+            # right_buf are shared scratch — the left child's recursion
+            # reuses them for its own partitioning, clobbering right_buf and
+            # the r_copy we would otherwise take after the left recursion.
+            have_left  = lc != Int32(0) && !isempty(left_buf)
+            have_right = rc != Int32(0) && !isempty(right_buf)
+            if have_left && have_right
+                l_copy = copy(left_buf)
+                r_copy = copy(right_buf)
+                _batch_recurse!(ys, wrk, arr, arr[lc], d, xs, l_copy,
+                                 saved, left_buf, right_buf)
+                _batch_recurse!(ys, wrk, arr, arr[rc], d, xs, r_copy,
+                                 saved, left_buf, right_buf)
+            elseif have_left
+                l_copy = copy(left_buf)
+                _batch_recurse!(ys, wrk, arr, arr[lc], d, xs, l_copy,
+                                 saved, left_buf, right_buf)
+            elseif have_right
+                r_copy = copy(right_buf)
+                _batch_recurse!(ys, wrk, arr, arr[rc], d, xs, r_copy,
+                                 saved, left_buf, right_buf)
+            end
+        end
+        node.l[d] > 1 && break
+    end
+
+    # Restore parent's wrk[dimshift, i] from this frame's stack slice and pop.
+    @inbounds for (k, i) in pairs(subset)
+        wrk[dimshift, i] = saved[save_off + k]
+    end
+    resize!(saved, save_off)
+    return ys
+end
 
 function makework(fun, x::AbstractVector)
     N = dims(fun,1)
@@ -387,21 +620,15 @@ function makework(fun, x)
     return @SVector ones(T, N)
 end
 
-function evaluate_recursive(y, wrk, fun::AdaptiveSparseGrid, idx::Index, dimshift, x)
-    # Dimensions of domain/codomain
-    N, K = dims(fun)
-
-    # Get the node that we're working on now
-    node  = fun.nodes[idx]
-    depth = node.depth
-
+function evaluate_recursive(y, wrk, arr::Vector{EvalNode{D,K,T}},
+                             node::EvalNode{D,K,T}, dimshift, x) where {D,K,T}
     # We have stored the basis function evaluations for every dimension except
-    # dimshift 
-    wrk = setindex(wrk, ϕ(node, x, dimshift),   dimshift)
+    # dimshift
+    wrk = @inbounds setindex(wrk, ϕ(node, x, dimshift), dimshift)
 
     # Compute the product across all the dimensions
     u = 1.0
-    for d in 1:N
+    @inbounds for d in 1:D
         u *= wrk[d]
     end
 
@@ -410,31 +637,20 @@ function evaluate_recursive(y, wrk, fun::AdaptiveSparseGrid, idx::Index, dimshif
         y = setindex(y, y[k] + u * node.α[k], k)
     end
 
-    # If the contribution of this node is nonzero (i.e, x lies in the support of
-    # this basis function), then we continue checking all of it's children
+    # Descend into children via Int32 indices into the flat array.
+    # A child id of 0 means no child along that side/dimension.
     if u > 0
-        for d in 1:N
-
-            # Figure out which side we need to be on
+        @inbounds for d in 1:D
             kd = childsplit(node, x, d)
-
-            # Calculate the index of the left or right child in dimension d
             if kd > 0
-                if kd == 1
-                    child = leftchild(idx, d)
-                else
-                    child = rightchild(idx, d)
-                end
-
-                # Check if that node is in the tree -- if it is, then descend into
-                # it
-                if haskey(fun.nodes, child)
-                    y = evaluate_recursive(y, wrk, fun, child, d, x)
+                cid = kd == 1 ? node.left[d] : node.right[d]
+                if cid != Int32(0)
+                    y = evaluate_recursive(y, wrk, arr, arr[cid], d, x)
                 end
             end
 
-            # We descend through the nodes lexicographically
-            if idx[1][d] > 1
+            # Descend through the nodes lexicographically
+            if node.l[d] > 1
                 break
             end
         end
@@ -443,66 +659,39 @@ function evaluate_recursive(y, wrk, fun::AdaptiveSparseGrid, idx::Index, dimshif
     return y
 end
 
-function childsplit(n::Node, x, d; inclusive=false)
-    if n.x[d] > x[d] || inclusive && n.x[d] == x[d]
-        return 1
-    elseif n.x[d] < x[d]
-        return 2
-    else
-        return 0
-    end
+@inline function childsplit(n::EvalNode, x, d)
+    @inbounds nxd = n.x[d]
+    @inbounds xd  = x[d]
+    nxd > xd && return 1
+    nxd < xd && return 2
+    return 0
 end
 
 get(x::KTuple, i::Int)      = x[i]
 get(x::KTuple, s::Symbol)   = getproperty(x, s)
 
-function evaluate_recursive(wrk, fun::AdaptiveSparseGrid, idx::Index, dimshift, x, k)
-    # Dimensions of domain/codomain
-    N, K = dims(fun)
+function evaluate_recursive(wrk, arr::Vector{EvalNode{D,K,T}},
+                             node::EvalNode{D,K,T}, dimshift, x, k) where {D,K,T}
+    wrk = @inbounds setindex(wrk, ϕ(node, x, dimshift), dimshift)
 
-    # Get the node that we're working on now
-    node  = fun.nodes[idx]
-    depth = node.depth
-
-    # We have stored the basis function evaluations for every dimension except
-    # dimshift 
-    wrk = setindex(wrk, ϕ(node, x, dimshift),   dimshift)
-
-    # Compute the product across all the dimensions
     u = 1.0
-    for d in 1:N 
+    @inbounds for d in 1:D
         u *= wrk[d]
     end
 
-    # Add in the the contribution of this node to the running sum
-    y = u * get(node.α, k)
+    y = u * @inbounds(get(node.α, k))
 
-    # If the contribution of this node is nonzero (i.e, x lies in the support of
-    # this basis function), then we continue checking all of it's children
     if u > 0
-        for d in 1:N
-
-            # Figure out which side we need to be on
+        @inbounds for d in 1:D
             kd = childsplit(node, x, d)
             if kd > 0
-
-                # Calculate the index of the left or right child in dimension d
-                if kd == 1
-                    child = leftchild(idx, d)
-                else
-                    child = rightchild(idx, d)
+                cid = kd == 1 ? node.left[d] : node.right[d]
+                if cid != Int32(0)
+                    y += evaluate_recursive(wrk, arr, arr[cid], d, x, k)
                 end
-
-                # Check if that node is in the tree -- if it is, then descend into
-                # it
-                if haskey(fun.nodes, child)
-                    y += evaluate_recursive(wrk, fun, child, d, x, k)
-                end
-
             end
 
-            # We descend through the nodes lexicographically
-            if idx[1][d] > 1
+            if node.l[d] > 1
                 break
             end
         end
@@ -518,6 +707,10 @@ end
 function fit!(f, fun::AdaptiveSparseGrid; kwargs...)
     # We need to evaluate f on the base node
     train!(f, fun, collect(values(fun.nodes)))
+    # The root node was already in fun.nodes before fit!, so drive_to_college!
+    # (which is the normal sync point) never fired for it. Capture its
+    # freshly-trained α in the flat _eval view before the first refine step.
+    sync_eval!(fun)
 
     while true
         n = refinegrid!(f, fun; kwargs...)
@@ -671,6 +864,93 @@ function drive_to_college!(fun, children)
     for child in children
         fun.nodes[Index(child.l, child.i)] = child
     end
+    link_to_parents!(fun, children)
+    sync_eval!(fun)
+end
+
+"""
+Rebuild the flat `_eval` vector from the current mutable `nodes` Dict.
+Slot 1 always holds the root (the all-ones Index). This is invoked after
+every `drive_to_college!` so subsequent `evaluate` calls (used inside
+`train!` to compute the current approximation at new points) see an
+up-to-date eval view.
+"""
+function sync_eval!(fun::AdaptiveSparseGrid{N,K,L,T}) where {N,K,L,T}
+    isempty(fun.nodes) && (empty!(fun._eval); empty!(fun._id); return fun)
+
+    # root(fun) = _eval[1] reads slot 1 unconditionally; sync relies on the
+    # root node being present in fun.nodes so slot 1 gets populated by the
+    # (idx, n) loop below. No public API deletes the root today, but guard
+    # the invariant explicitly.
+    root_idx = base(fun)
+    @assert haskey(fun.nodes, root_idx) "sync_eval!: root index missing from fun.nodes"
+
+    # Assign stable positions: root → 1, then the rest in Dict order.
+    empty!(fun._id); sizehint!(fun._id, length(fun.nodes))
+    fun._id[root_idx] = Int32(1)
+    next::Int32 = 2
+    for idx in keys(fun.nodes)
+        idx == root_idx && continue
+        fun._id[idx] = next
+        next += Int32(1)
+    end
+
+    resize!(fun._eval, length(fun.nodes))
+    for (idx, n) in fun.nodes
+        id = fun._id[idx]
+        fun._eval[id] = EvalNode{N,K,T}(
+            n.α, n.x, n.l, n.i,
+            ntuple(d -> _eval_child_id(fun._id, n.left[d]),  Val(N)),
+            ntuple(d -> _eval_child_id(fun._id, n.right[d]), Val(N)),
+        )
+    end
+    return fun
+end
+
+_eval_child_id(::Dict, ::Nothing) = Int32(0)
+# `n` came from the trusted tree, so skip Index's default validation (`check=false`):
+# avoids O(N·D) `m(lk)` calls across a full sync.
+_eval_child_id(id::Dict, n::Node) = Base.get(id, Index(n.l, n.i, false), Int32(0))
+
+"""
+Update each new child's parent node(s) so that the parent's `children`
+field points to this child in the appropriate slot. This maintains the
+invariant `evaluate_recursive` relies on: if a child exists in `fun.nodes`
+then its parent's corresponding `children` slot holds a reference to it
+(and the slot is `nothing` otherwise).
+"""
+function link_to_parents!(fun, new_children)
+    for c in new_children
+        D = length(c.l)
+        for d in 1:D
+            c.l[d] == 1 && continue
+            p_idx = parent(Index(c.l, c.i), d)
+            p = Base.get(fun.nodes, p_idx, nothing)
+            p === nothing && continue
+            p_l_d = p.l[d]; p_i_d = p.i[d]
+            lch_ld, lch_id = leftchild(p_l_d, p_i_d)
+            if (c.l[d], c.i[d]) == (lch_ld, lch_id)
+                _set_left!(p, d, c)
+            else
+                rch_ld, rch_id = rightchild(p_l_d, p_i_d)
+                if (c.l[d], c.i[d]) == (rch_ld, rch_id)
+                    _set_right!(p, d, c)
+                end
+            end
+        end
+    end
+end
+
+function _set_left!(p::Node{D,K,T}, d::Int, c::Node{D,K,T}) where {D,K,T}
+    old = p.left
+    p.left = ntuple(s -> s == d ? c : old[s], Val(D))
+    return
+end
+
+function _set_right!(p::Node{D,K,T}, d::Int, c::Node{D,K,T}) where {D,K,T}
+    old = p.right
+    p.right = ntuple(s -> s == d ? c : old[s], Val(D))
+    return
 end
 
 function addchildren!(children, node, d)
@@ -792,7 +1072,7 @@ function integrate(int::AdaptiveIntegral, x)
     T    = promote_type(eltype(x), Float64)
     y    = @SVector zeros(T, dims(int.fun, 2))
     wrk  = makework(int.fun, x)
-    return integrate_recursive!(y, wrk, int, base(int.fun), 1, x)
+    return integrate_recursive!(y, wrk, int, int.fun._eval, root(int.fun), 1, x)
 end
 
 function scale(int::AdaptiveIntegral, x)
@@ -807,64 +1087,39 @@ function scale(int::AdaptiveIntegral, x)
 end
 
 
-function integrate_recursive!(y, wrk, int::AdaptiveIntegral, idx::Index, dimshift, x)
-    # Dimensions of domain/codomain
-    fun  = int.fun
-    N, K = dims(fun)
-
-    # Get the node that we're working on now
-    @inbounds node  = fun.nodes[idx]
-    @inbounds depth = node.depth
-
-    # We have stored the basis function evaluations for every dimension except
-    # dimshift 
+function integrate_recursive!(y, wrk, int::AdaptiveIntegral,
+                               arr::Vector{EvalNode{D,K,T}},
+                               node::EvalNode{D,K,T},
+                               dimshift, x) where {D,K,T}
+    # Integration dim? Use basis integral; else evaluate basis at x.
     newval = in(dimshift, int.dims) ?
-                I(node,dimshift)     :
+                I(node, dimshift)  :
                 ϕ(node, x, dimshift)
-    wrk = setindex(wrk, newval,   dimshift)
-    
-    # Compute the product across all the dimensions
+    wrk = @inbounds setindex(wrk, newval, dimshift)
+
     u = 1.0
-    for d in 1:N
+    @inbounds for d in 1:D
         u *= wrk[d]
     end
 
-    # Add in the the contribution of this node to the running sum
     @inbounds @simd for k in 1:K
         y = setindex(y, y[k] + u * node.α[k], k)
     end
 
-    # If the contribution of this node is nonzero (i.e, x lies in the support of
-    # this basis function), then we continue checking all of it's children
     if u > 0
-        for d in 1:N
-
-            # Are we considering in an integration dimension
+        @inbounds for d in 1:D
             dd = in(d, int.dims)
-
-            # If not, we can compute which side to split along
-            if !dd
-                kd = childsplit(node, x, d)
-            end
+            kd = dd ? 0 : childsplit(node, x, d)
 
             for split in 1:2
                 !dd && kd != split && continue
-
-                if split == 1
-                    child = leftchild(idx, d)
-                else
-                    child = rightchild(idx, d)
-                end
-
-                # Check if that node is in the tree -- if it is, then descend into
-                # it
-                if haskey(fun.nodes, child)
-                    y = integrate_recursive!(y, wrk, int, child, d, x)
+                cid = split == 1 ? node.left[d] : node.right[d]
+                if cid != Int32(0)
+                    y = integrate_recursive!(y, wrk, int, arr, arr[cid], d, x)
                 end
             end
 
-            # We descend through the nodes lexicographically
-            if idx[1][d] > 1
+            if node.l[d] > 1
                 break
             end
         end
@@ -873,14 +1128,16 @@ function integrate_recursive!(y, wrk, int::AdaptiveIntegral, idx::Index, dimshif
     return y
 end
 
-function I(l)
-    l >  2 && return 1/(2 << (l-2))
+@inline function I(l)
+    # Hot path from integrate_recursive!. Only called with l >= 1 on
+    # the grid; no throw branch so LLVM can drop the GC frame.
+    l > 2  && return 1/(2 << (l-2))
     l == 2 && return 1/4
-    l == 1 && return 1.0
-    throw(ArgumentError("l must be positive"))
+    return 1.0                     # l == 1
 end
 
-I(n::Node, d) = I(n.l[d])
+@inline I(n::Node,     d) = @inbounds I(n.l[d])
+@inline I(n::EvalNode, d) = @inbounds I(n.l[d])
 ################################################################################
 ##################### Helper Utilities #########################################
 ################################################################################

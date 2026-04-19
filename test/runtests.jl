@@ -3,6 +3,7 @@ using AdaptiveSparseGrids
 using ForwardDiff
 using StaticArrays
 using QuadGK
+using Random
 
 @testset "Adaptive Sparse Grid Tests" begin
 
@@ -92,7 +93,9 @@ using QuadGK
     end
 
     @testset "Dϕ: Derivatives" begin
-        for x in LinRange(-1, 1, 5)
+        # Only interior points: ϕ has kinks at x ∈ {-1, 0, 1} and ForwardDiff's
+        # convention for abs'(0) differs from the one-sided value we return.
+        for x in [-0.9, -0.4, 0.3, 0.6, 0.9]
             @test Dϕ(x) == ForwardDiff.derivative(ϕ, x)
         end
     end
@@ -332,6 +335,214 @@ end
         end
     end
 
+@testset "Bulk evaluate! matches per-point" begin
+    import AdaptiveSparseGrids: evaluate!
+    # Regression tests: _bulk_evaluate! (including the batched K=1 path) must
+    # return the exact same values as per-point evaluation for every input.
+    # Before the fix, the scalar-codomain batched walk threaded a single shared
+    # `saved` scratch vector through recursion; child frames clobbered the
+    # parent's snapshot of `wrk`, corrupting sibling descents and producing
+    # garbage for most points.
+
+    rtol = 1e-12
+
+    @testset "2D scalar (gauss)" begin
+        gauss((x,y)) = exp(-(x^2 + y^2))
+        fun = AdaptiveSparseGrid(gauss, [-1.0, -1.0], [1.0, 1.0],
+                                 tol=1e-4, max_depth=12)
+
+        rng = MersenneTwister(20260419)
+        pts = [(-1 + 2*rand(rng), -1 + 2*rand(rng)) for _ in 1:200]
+
+        expected = [fun(p) for p in pts]
+        ys       = zeros(length(pts))
+        evaluate!(ys, fun, pts)
+
+        @test length(ys) == length(expected)
+        @test maximum(abs, ys .- expected) < rtol
+    end
+
+    @testset "3D scalar (gauss)" begin
+        gauss((x,y,z)) = exp(-(x^2 + y^2 + z^2))
+        fun = AdaptiveSparseGrid(gauss, [-1.0, -1.0, -1.0], [1.0, 1.0, 1.0],
+                                 tol=1e-3, max_depth=10)
+
+        rng = MersenneTwister(20260419)
+        pts = [(-1 + 2*rand(rng), -1 + 2*rand(rng), -1 + 2*rand(rng))
+               for _ in 1:200]
+
+        expected = [fun(p) for p in pts]
+        ys       = zeros(length(pts))
+        evaluate!(ys, fun, pts)
+
+        @test maximum(abs, ys .- expected) < rtol
+    end
+
+    @testset "Vector-of-Vector input" begin
+        # Point type matters: the dispatch accepts AbstractVector or Tuple.
+        g((x,y,z)) = sin(x) * cos(y) + z^2
+        fun = AdaptiveSparseGrid(g, [0.0, 0.0, 0.0], [1.0, 1.0, 1.0],
+                                 tol=1e-3, max_depth=10)
+
+        rng = MersenneTwister(20260419)
+        pts = [[rand(rng), rand(rng), rand(rng)] for _ in 1:150]
+
+        expected = [fun(p) for p in pts]
+        ys       = zeros(length(pts))
+        evaluate!(ys, fun, pts)
+
+        @test maximum(abs, ys .- expected) < rtol
+    end
+
+    @testset "Small batch (M < nthreads) still correct" begin
+        # Thread chunking: cld(M, nth) with M smaller than nth forces some
+        # chunks empty. Make sure edge cases don't break correctness.
+        g((x,y)) = exp(-(x^2 + y^2))
+        fun = AdaptiveSparseGrid(g, [-1.0, -1.0], [1.0, 1.0],
+                                 tol=1e-3, max_depth=10)
+
+        pts = [(0.1, 0.2), (0.3, -0.4), (-0.5, 0.6)]
+        expected = [fun(p) for p in pts]
+        ys       = zeros(length(pts))
+        evaluate!(ys, fun, pts)
+
+        @test maximum(abs, ys .- expected) < rtol
+    end
+
+    @testset "Chunking invariance" begin
+        # Correctness of the batched bulk path must be independent of how we
+        # partition the point cloud into chunks and of whether we dispatch
+        # those chunks through Threads.@threads or a serial loop. This test
+        # exercises the chunking logic deterministically even when CI runs
+        # under a single thread (the default), which would otherwise make
+        # the chunk-boundary branches unreachable.
+        import AdaptiveSparseGrids: _bulk_evaluate_batched!
+        g((x,y)) = exp(-(x^2 + y^2))
+        fun = AdaptiveSparseGrid(g, [-1.0, -1.0], [1.0, 1.0],
+                                 tol=1e-3, max_depth=10)
+        rng = MersenneTwister(20260419)
+        pts = [(-1 + 2*rand(rng), -1 + 2*rand(rng)) for _ in 1:150]
+        expected = [fun(p) for p in pts]
+
+        # nchunks=1: no chunking. nchunks=3,7: typical multi-chunk.
+        # nchunks=200 > length(pts): exercises the lo > hi empty-chunk branch.
+        for nchunks in (1, 3, 7, 200), threaded in (false, true)
+            ys = zeros(length(pts))
+            _bulk_evaluate_batched!(ys, fun, pts;
+                                     nchunks = nchunks, threaded = threaded)
+            @test maximum(abs, ys .- expected) < rtol
+        end
+    end
+
+    @testset "Multi-codomain matches per-point" begin
+        # K > 1 uses the point-parallel fallback path but should still agree
+        # with per-point evaluation.
+        g((x,y)) = (a = sin(x)*cos(y), b = x^2 + y^2)
+        fun = AdaptiveSparseGrid(g, [0.0, 0.0], [1.0, 1.0],
+                                 tol=1e-3, max_depth=10)
+
+        rng = MersenneTwister(20260419)
+        pts = [(rand(rng), rand(rng)) for _ in 1:100]
+
+        expected = [fun(p) for p in pts]
+        ys       = similar(expected)
+        evaluate!(ys, fun, pts)
+
+        @test all(ys[i] == expected[i] for i in eachindex(pts))
+    end
+
+    @testset "SVector input" begin
+        # The README example uses SVector points; make sure dispatch picks
+        # up the bulk path for that element type.
+        g((x,y,z)) = sin(x) + cos(y) * z
+        fun = AdaptiveSparseGrid(g, [0.0, 0.0, 0.0], [1.0, 1.0, 1.0],
+                                 tol=1e-3, max_depth=10)
+
+        rng = MersenneTwister(20260419)
+        pts = [SVector{3,Float64}(rand(rng), rand(rng), rand(rng)) for _ in 1:100]
+
+        expected = [fun(p) for p in pts]
+        ys       = zeros(length(pts))
+        evaluate!(ys, fun, pts)
+
+        @test maximum(abs, ys .- expected) < rtol
+    end
+
+    @testset "4D grid exercises deeper recursion" begin
+        g((x,y,z,w)) = exp(-(x^2 + y^2 + z^2 + w^2))
+        fun = AdaptiveSparseGrid(g, [-1.0, -1.0, -1.0, -1.0],
+                                  [1.0, 1.0, 1.0, 1.0],
+                                  tol=1e-2, max_depth=9)
+
+        rng = MersenneTwister(20260419)
+        pts = [(-1 + 2*rand(rng), -1 + 2*rand(rng),
+                -1 + 2*rand(rng), -1 + 2*rand(rng)) for _ in 1:120]
+
+        expected = [fun(p) for p in pts]
+        ys       = zeros(length(pts))
+        evaluate!(ys, fun, pts)
+
+        @test maximum(abs, ys .- expected) < rtol
+    end
+
+    @testset "Query at node coordinates (boundary xd == nxd)" begin
+        # The batched partition uses `xd < nxd` / `xd > nxd` strict comparisons,
+        # so points with `xd == nxd` along some dimension are dropped from that
+        # dimension's child subsets. This must agree with per-point `childsplit`,
+        # which also returns 0 on equality. Random test points never hit this;
+        # we construct points that land exactly on grid node coordinates.
+        g((x,y)) = exp(-(x^2 + y^2))
+        fun = AdaptiveSparseGrid(g, [0.0, 0.0], [1.0, 1.0],
+                                 tol=1e-4, max_depth=10)
+
+        pts = [
+            (0.5, 0.5),    # root coordinate
+            (0.5, 0.25),   # exactly on a dim-1 node line
+            (0.25, 0.5),   # exactly on a dim-2 node line
+            (0.5, 0.75),
+            (0.75, 0.5),
+            (0.125, 0.5),
+            (0.5, 0.125),
+        ]
+        expected = [fun(p) for p in pts]
+        ys       = zeros(length(pts))
+        evaluate!(ys, fun, pts)
+
+        @test maximum(abs, ys .- expected) < rtol
+    end
+
+    @testset "Repeated-call stability" begin
+        # Evaluate twice with no intervening work. Catches scratch-buffer
+        # leakage or any state carried between calls.
+        g((x,y,z)) = sin(x) * cos(y) + z
+        fun = AdaptiveSparseGrid(g, [0.0, 0.0, 0.0], [1.0, 1.0, 1.0],
+                                 tol=1e-3, max_depth=10)
+
+        rng = MersenneTwister(20260419)
+        pts = [(rand(rng), rand(rng), rand(rng)) for _ in 1:200]
+
+        ys1 = zeros(length(pts)); evaluate!(ys1, fun, pts)
+        ys2 = zeros(length(pts)); evaluate!(ys2, fun, pts)
+        @test ys1 == ys2
+    end
+
+    @testset "Input validation" begin
+        g((x,y)) = x + y
+        fun = AdaptiveSparseGrid(g, [0.0, 0.0], [1.0, 1.0],
+                                 tol=1e-2, max_depth=6)
+        pts = [(0.1, 0.2), (0.3, 0.4), (0.5, 0.6)]
+
+        # Length mismatch should raise DimensionMismatch.
+        @test_throws DimensionMismatch evaluate!(zeros(2), fun, pts)
+        @test_throws DimensionMismatch evaluate!(zeros(5), fun, pts)
+
+        # Empty input must be a no-op (M == 0 early return).
+        ys_empty = Float64[]
+        evaluate!(ys_empty, fun, typeof(pts)())
+        @test isempty(ys_empty)
+    end
+end
+
 end
 
 @testset "Integration Tests (1D)" begin
@@ -344,6 +555,101 @@ end
 
         v = quadgk(g, 0, 10)[1]
         @test abs(f()[1] - v)/max(v,1) < 1e-8
+    end
+end
+
+@testset "sync_eval! invariants" begin
+    # Flat-eval view invariants. End-to-end correctness tests would catch
+    # any desync via wrong values, but direct assertions make regressions
+    # easier to diagnose.
+    import AdaptiveSparseGrids: base
+
+    g((x,y)) = sin(x) * cos(y)
+    fun = AdaptiveSparseGrid(g, [0.0, 0.0], [π, π],
+                             tol=1e-3, max_depth=10)
+
+    # length(_eval) == length(nodes), every Node index has a slot.
+    @test length(fun._eval) == length(fun.nodes)
+    @test all(haskey(fun._id, idx) for idx in keys(fun.nodes))
+    @test all(1 <= fun._id[idx] <= length(fun._eval) for idx in keys(fun.nodes))
+
+    # Slot 1 is the root.
+    root_idx = base(fun)
+    @test fun._id[root_idx] == Int32(1)
+    @test fun._eval[1].α == fun.nodes[root_idx].α
+    @test fun._eval[1].x == fun.nodes[root_idx].x
+
+    # Spot-check a sample of non-root nodes: their EvalNode mirrors the Node.
+    for idx in Iterators.take(keys(fun.nodes), 20)
+        ev = fun._eval[fun._id[idx]]
+        n  = fun.nodes[idx]
+        @test ev.α == n.α
+        @test ev.x == n.x
+        @test ev.l == n.l
+        @test ev.i == n.i
+    end
+end
+
+@testset "Partial Integration (multi-D)" begin
+    # 1D `AdaptiveIntegral` has `dims == {1}`, so in `integrate_recursive!`
+    # every dim is an integration dim (`dd = true`) and the `!dd` branch
+    # (partial integration via `childsplit` + single-child descent) is never
+    # exercised. The rewritten EvalNode traversal could have a latent bug
+    # there. These tests build multi-D integrals with a strict subset of
+    # integrated dims to hit both branches.
+
+    rtol = 1e-6
+
+    @testset "2D integrand, integrate dim 1" begin
+        # g(x,y) = sin(x) * cos(y); integrate over x ∈ [0, π]
+        # Expected: (∫₀^π sin dx) * cos(y) = 2 * cos(y)
+        g((x,y)) = sin(x) * cos(y)
+        int = AdaptiveIntegral(g, [0.0, 0.0], [π, 2π], 1,
+                               tol=1e-8, max_depth=15)
+        for y in LinRange(0, 2π, 11)
+            got      = int([y])
+            expected = 2 * cos(y)
+            @test abs(got[1] - expected) < rtol
+        end
+    end
+
+    @testset "2D integrand, integrate dim 2" begin
+        # Integrate the SECOND dim — sanity-checks that `dimshift` indexing
+        # into int.dims works for non-leading integrated dims.
+        g((x,y)) = sin(x) * cos(y)
+        int = AdaptiveIntegral(g, [0.0, 0.0], [π, 2π], 2,
+                               tol=1e-8, max_depth=15)
+        # ∫₀^{2π} cos(y) dy = 0, so expected = 0 for all x
+        for x in LinRange(0, π, 11)
+            got = int([x])
+            @test abs(got[1]) < rtol
+        end
+    end
+
+    @testset "3D integrand, integrate dims (1,3)" begin
+        # dd = (1,3) — `!dd` branch fires on dim 2 while `dd` fires on 1 and 3.
+        # g(x,y,z) = sin(x) * cos(y) * exp(z); integrate over x ∈ [0,π], z ∈ [0,1]
+        # Expected: 2 * cos(y) * (e - 1)
+        g((x,y,z)) = sin(x) * cos(y) * exp(z)
+        int = AdaptiveIntegral(g, [0.0, 0.0, 0.0], [π, 2π, 1.0], (1, 3),
+                               tol=1e-5, max_depth=12)
+        for y in LinRange(0, 2π, 7)
+            got      = int([y])
+            expected = 2 * cos(y) * (ℯ - 1)
+            @test abs(got[1] - expected) / max(abs(expected), 1) < 1e-4
+        end
+    end
+
+    @testset "3D integrand, integrate middle dim only" begin
+        # dd = (2,) — exercises two `!dd` dims (1 and 3) around one `dd` dim.
+        g((x,y,z)) = sin(x) * cos(y) * exp(z)
+        int = AdaptiveIntegral(g, [0.0, 0.0, 0.0], [π, 2π, 1.0], 2,
+                               tol=1e-5, max_depth=12)
+        # ∫₀^{2π} cos(y) dy = 0
+        for x in LinRange(0, π, 5), z in LinRange(0, 1, 5)
+            got = int([x, z])
+            @test abs(got[1]) < 1e-4
+        end
     end
 end
 

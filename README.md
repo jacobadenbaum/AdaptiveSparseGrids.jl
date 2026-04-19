@@ -49,6 +49,34 @@ fun(x, 1)       # returns value of fun[1] at x (if f: R^n -> R^m with m > 1)
 length(fun)
 ```
 
+## Evaluating many points at once
+
+If you have a cloud of points to evaluate, **always use the bulk form
+`evaluate!(ys, fun, xs)`** instead of looping `fun(x)` yourself. For
+scalar-codomain grids it runs a single batch-coherent traversal of the
+tree across the whole point cloud in parallel, which can be **one to two
+orders of magnitude faster** than per-point evaluation — the tree is
+walked once and each node contributes to every point that lands in its
+support.
+
+```julia
+using AdaptiveSparseGrids
+using StaticArrays
+
+fun = AdaptiveSparseGrid(x -> exp(-sum(abs2, x)), fill(-1.0, 4), fill(1.0, 4);
+                         tol = 1e-3, max_depth = 10)
+
+# Many query points
+xs = [SVector{4,Float64}(2 .* rand(4) .- 1) for _ in 1:100_000]
+ys = similar(xs, Float64)
+
+AdaptiveSparseGrids.evaluate!(ys, fun, xs)   # parallel, batch-coherent
+```
+
+Run Julia with `-t auto` (or set `JULIA_NUM_THREADS`) to get the
+parallel speedup. The bulk path falls back to per-point parallel
+evaluation when the codomain has more than one component.
+
 ## Functions can return named arguments
 The return type of the functions can be named tuples.  You can reference the fieldnames later when accessing the results!
 
