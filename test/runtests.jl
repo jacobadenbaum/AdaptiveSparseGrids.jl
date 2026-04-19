@@ -442,6 +442,69 @@ end
     end
 end
 
+@testset "Partial Integration (multi-D)" begin
+    # 1D `AdaptiveIntegral` has `dims == {1}`, so in `integrate_recursive!`
+    # every dim is an integration dim (`dd = true`) and the `!dd` branch
+    # (partial integration via `childsplit` + single-child descent) is never
+    # exercised. The rewritten EvalNode traversal could have a latent bug
+    # there. These tests build multi-D integrals with a strict subset of
+    # integrated dims to hit both branches.
+
+    rtol = 1e-6
+
+    @testset "2D integrand, integrate dim 1" begin
+        # g(x,y) = sin(x) * cos(y); integrate over x ∈ [0, π]
+        # Expected: (∫₀^π sin dx) * cos(y) = 2 * cos(y)
+        g((x,y)) = sin(x) * cos(y)
+        int = AdaptiveIntegral(g, [0.0, 0.0], [π, 2π], 1,
+                               tol=1e-8, max_depth=15)
+        for y in LinRange(0, 2π, 11)
+            got      = int([y])
+            expected = 2 * cos(y)
+            @test abs(got[1] - expected) < rtol
+        end
+    end
+
+    @testset "2D integrand, integrate dim 2" begin
+        # Integrate the SECOND dim — sanity-checks that `dimshift` indexing
+        # into int.dims works for non-leading integrated dims.
+        g((x,y)) = sin(x) * cos(y)
+        int = AdaptiveIntegral(g, [0.0, 0.0], [π, 2π], 2,
+                               tol=1e-8, max_depth=15)
+        # ∫₀^{2π} cos(y) dy = 0, so expected = 0 for all x
+        for x in LinRange(0, π, 11)
+            got = int([x])
+            @test abs(got[1]) < rtol
+        end
+    end
+
+    @testset "3D integrand, integrate dims (1,3)" begin
+        # dd = (1,3) — `!dd` branch fires on dim 2 while `dd` fires on 1 and 3.
+        # g(x,y,z) = sin(x) * cos(y) * exp(z); integrate over x ∈ [0,π], z ∈ [0,1]
+        # Expected: 2 * cos(y) * (e - 1)
+        g((x,y,z)) = sin(x) * cos(y) * exp(z)
+        int = AdaptiveIntegral(g, [0.0, 0.0, 0.0], [π, 2π, 1.0], (1, 3),
+                               tol=1e-5, max_depth=12)
+        for y in LinRange(0, 2π, 7)
+            got      = int([y])
+            expected = 2 * cos(y) * (ℯ - 1)
+            @test abs(got[1] - expected) / max(abs(expected), 1) < 1e-4
+        end
+    end
+
+    @testset "3D integrand, integrate middle dim only" begin
+        # dd = (2,) — exercises two `!dd` dims (1 and 3) around one `dd` dim.
+        g((x,y,z)) = sin(x) * cos(y) * exp(z)
+        int = AdaptiveIntegral(g, [0.0, 0.0, 0.0], [π, 2π, 1.0], 2,
+                               tol=1e-5, max_depth=12)
+        # ∫₀^{2π} cos(y) dy = 0
+        for x in LinRange(0, π, 5), z in LinRange(0, 1, 5)
+            got = int([x, z])
+            @test abs(got[1]) < 1e-4
+        end
+    end
+end
+
 
 @testset "Interpolation Tests (2D)" begin
 
