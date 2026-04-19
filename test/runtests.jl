@@ -450,6 +450,97 @@ end
 
         @test all(ys[i] == expected[i] for i in eachindex(pts))
     end
+
+    @testset "SVector input" begin
+        # The README example uses SVector points; make sure dispatch picks
+        # up the bulk path for that element type.
+        g((x,y,z)) = sin(x) + cos(y) * z
+        fun = AdaptiveSparseGrid(g, [0.0, 0.0, 0.0], [1.0, 1.0, 1.0],
+                                 tol=1e-3, max_depth=10)
+
+        rng = MersenneTwister(20260419)
+        pts = [SVector{3,Float64}(rand(rng), rand(rng), rand(rng)) for _ in 1:100]
+
+        expected = [fun(p) for p in pts]
+        ys       = zeros(length(pts))
+        evaluate!(ys, fun, pts)
+
+        @test maximum(abs, ys .- expected) < rtol
+    end
+
+    @testset "4D grid exercises deeper recursion" begin
+        g((x,y,z,w)) = exp(-(x^2 + y^2 + z^2 + w^2))
+        fun = AdaptiveSparseGrid(g, [-1.0, -1.0, -1.0, -1.0],
+                                  [1.0, 1.0, 1.0, 1.0],
+                                  tol=1e-2, max_depth=9)
+
+        rng = MersenneTwister(20260419)
+        pts = [(-1 + 2*rand(rng), -1 + 2*rand(rng),
+                -1 + 2*rand(rng), -1 + 2*rand(rng)) for _ in 1:120]
+
+        expected = [fun(p) for p in pts]
+        ys       = zeros(length(pts))
+        evaluate!(ys, fun, pts)
+
+        @test maximum(abs, ys .- expected) < rtol
+    end
+
+    @testset "Query at node coordinates (boundary xd == nxd)" begin
+        # The batched partition uses `xd < nxd` / `xd > nxd` strict comparisons,
+        # so points with `xd == nxd` along some dimension are dropped from that
+        # dimension's child subsets. This must agree with per-point `childsplit`,
+        # which also returns 0 on equality. Random test points never hit this;
+        # we construct points that land exactly on grid node coordinates.
+        g((x,y)) = exp(-(x^2 + y^2))
+        fun = AdaptiveSparseGrid(g, [0.0, 0.0], [1.0, 1.0],
+                                 tol=1e-4, max_depth=10)
+
+        pts = [
+            (0.5, 0.5),    # root coordinate
+            (0.5, 0.25),   # exactly on a dim-1 node line
+            (0.25, 0.5),   # exactly on a dim-2 node line
+            (0.5, 0.75),
+            (0.75, 0.5),
+            (0.125, 0.5),
+            (0.5, 0.125),
+        ]
+        expected = [fun(p) for p in pts]
+        ys       = zeros(length(pts))
+        evaluate!(ys, fun, pts)
+
+        @test maximum(abs, ys .- expected) < rtol
+    end
+
+    @testset "Repeated-call stability" begin
+        # Evaluate twice with no intervening work. Catches scratch-buffer
+        # leakage or any state carried between calls.
+        g((x,y,z)) = sin(x) * cos(y) + z
+        fun = AdaptiveSparseGrid(g, [0.0, 0.0, 0.0], [1.0, 1.0, 1.0],
+                                 tol=1e-3, max_depth=10)
+
+        rng = MersenneTwister(20260419)
+        pts = [(rand(rng), rand(rng), rand(rng)) for _ in 1:200]
+
+        ys1 = zeros(length(pts)); evaluate!(ys1, fun, pts)
+        ys2 = zeros(length(pts)); evaluate!(ys2, fun, pts)
+        @test ys1 == ys2
+    end
+
+    @testset "Input validation" begin
+        g((x,y)) = x + y
+        fun = AdaptiveSparseGrid(g, [0.0, 0.0], [1.0, 1.0],
+                                 tol=1e-2, max_depth=6)
+        pts = [(0.1, 0.2), (0.3, 0.4), (0.5, 0.6)]
+
+        # Length mismatch should raise DimensionMismatch.
+        @test_throws DimensionMismatch evaluate!(zeros(2), fun, pts)
+        @test_throws DimensionMismatch evaluate!(zeros(5), fun, pts)
+
+        # Empty input must be a no-op (M == 0 early return).
+        ys_empty = Float64[]
+        evaluate!(ys_empty, fun, typeof(pts)())
+        @test isempty(ys_empty)
+    end
 end
 
 end
