@@ -3,6 +3,7 @@ using AdaptiveSparseGrids
 using ForwardDiff
 using StaticArrays
 using QuadGK
+using Random
 
 @testset "Adaptive Sparse Grid Tests" begin
 
@@ -333,6 +334,98 @@ end
             @test abs(f(x) - g(x))/max(g(x),1) < 1e-8
         end
     end
+
+@testset "Bulk evaluate! matches per-point" begin
+    import AdaptiveSparseGrids: evaluate!
+    # Regression tests: _bulk_evaluate! (including the batched K=1 path) must
+    # return the exact same values as per-point evaluation for every input.
+    # Before the fix, the scalar-codomain batched walk threaded a single shared
+    # `saved` scratch vector through recursion; child frames clobbered the
+    # parent's snapshot of `wrk`, corrupting sibling descents and producing
+    # garbage for most points.
+
+    rtol = 1e-12
+
+    @testset "2D scalar (gauss)" begin
+        gauss((x,y)) = exp(-(x^2 + y^2))
+        fun = AdaptiveSparseGrid(gauss, [-1.0, -1.0], [1.0, 1.0],
+                                 tol=1e-4, max_depth=12)
+
+        rng = MersenneTwister(20260419)
+        pts = [(-1 + 2*rand(rng), -1 + 2*rand(rng)) for _ in 1:200]
+
+        expected = [fun(p) for p in pts]
+        ys       = zeros(length(pts))
+        evaluate!(ys, fun, pts)
+
+        @test length(ys) == length(expected)
+        @test maximum(abs, ys .- expected) < rtol
+    end
+
+    @testset "3D scalar (gauss)" begin
+        gauss((x,y,z)) = exp(-(x^2 + y^2 + z^2))
+        fun = AdaptiveSparseGrid(gauss, [-1.0, -1.0, -1.0], [1.0, 1.0, 1.0],
+                                 tol=1e-3, max_depth=10)
+
+        rng = MersenneTwister(20260419)
+        pts = [(-1 + 2*rand(rng), -1 + 2*rand(rng), -1 + 2*rand(rng))
+               for _ in 1:200]
+
+        expected = [fun(p) for p in pts]
+        ys       = zeros(length(pts))
+        evaluate!(ys, fun, pts)
+
+        @test maximum(abs, ys .- expected) < rtol
+    end
+
+    @testset "Vector-of-Vector input" begin
+        # Point type matters: the dispatch accepts AbstractVector or Tuple.
+        g((x,y,z)) = sin(x) * cos(y) + z^2
+        fun = AdaptiveSparseGrid(g, [0.0, 0.0, 0.0], [1.0, 1.0, 1.0],
+                                 tol=1e-3, max_depth=10)
+
+        rng = MersenneTwister(20260419)
+        pts = [[rand(rng), rand(rng), rand(rng)] for _ in 1:150]
+
+        expected = [fun(p) for p in pts]
+        ys       = zeros(length(pts))
+        evaluate!(ys, fun, pts)
+
+        @test maximum(abs, ys .- expected) < rtol
+    end
+
+    @testset "Small batch (M < nthreads) still correct" begin
+        # Thread chunking: cld(M, nth) with M smaller than nth forces some
+        # chunks empty. Make sure edge cases don't break correctness.
+        g((x,y)) = exp(-(x^2 + y^2))
+        fun = AdaptiveSparseGrid(g, [-1.0, -1.0], [1.0, 1.0],
+                                 tol=1e-3, max_depth=10)
+
+        pts = [(0.1, 0.2), (0.3, -0.4), (-0.5, 0.6)]
+        expected = [fun(p) for p in pts]
+        ys       = zeros(length(pts))
+        evaluate!(ys, fun, pts)
+
+        @test maximum(abs, ys .- expected) < rtol
+    end
+
+    @testset "Multi-codomain matches per-point" begin
+        # K > 1 uses the point-parallel fallback path but should still agree
+        # with per-point evaluation.
+        g((x,y)) = (a = sin(x)*cos(y), b = x^2 + y^2)
+        fun = AdaptiveSparseGrid(g, [0.0, 0.0], [1.0, 1.0],
+                                 tol=1e-3, max_depth=10)
+
+        rng = MersenneTwister(20260419)
+        pts = [(rand(rng), rand(rng)) for _ in 1:100]
+
+        expected = [fun(p) for p in pts]
+        ys       = similar(expected)
+        evaluate!(ys, fun, pts)
+
+        @test all(ys[i] == expected[i] for i in eachindex(pts))
+    end
+end
 
 end
 

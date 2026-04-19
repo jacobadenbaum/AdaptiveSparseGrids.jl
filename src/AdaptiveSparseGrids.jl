@@ -504,8 +504,10 @@ end
 # at this node relative to its parent; `wrk`'s other rows are valid for every
 # active point already. `saved`, `left_buf`, `right_buf` are per-thread
 # reusable scratch buffers — resized but never freshly allocated inside the
-# recursion. Partition subsets are copied once per recursion to isolate the
-# shared `left_buf`/`right_buf` state across sibling recursions.
+# recursion. `saved` is used as a stack: each frame pushes its snapshot at the
+# tail on entry and pops it on return, so child frames can't clobber the
+# parent's restore data. Partition subsets are copied once per recursion to
+# isolate the shared `left_buf`/`right_buf` state across sibling recursions.
 function _batch_recurse!(ys, wrk::Matrix{Float64},
                          arr::Vector{EvalNode{D,K,T}},
                          node::EvalNode{D,K,T}, dimshift::Int,
@@ -519,11 +521,12 @@ function _batch_recurse!(ys, wrk::Matrix{Float64},
     α1 = node.α[1]
     nsub = length(subset)
 
-    # Save the parent's wrk[dimshift, i] for restoration later (wrk is shared
-    # across sibling subtrees), then write this node's basis value.
-    resize!(saved, nsub)
+    # Push this frame's snapshot of wrk[dimshift, i] at the tail of `saved`
+    # (used as a stack), then write this node's basis value.
+    save_off = length(saved)
+    resize!(saved, save_off + nsub)
     @inbounds for (k, i) in pairs(subset)
-        saved[k] = wrk[dimshift, i]
+        saved[save_off + k] = wrk[dimshift, i]
         wrk[dimshift, i] = ϕ(l_ds, i_ds, xs[i][dimshift])
     end
 
@@ -551,14 +554,24 @@ function _batch_recurse!(ys, wrk::Matrix{Float64},
                     push!(right_buf, i)
                 end
             end
-            # Copies isolate each child's view of the subset: the child
-            # recursion reuses left_buf / right_buf for its own partitioning.
-            if lc != Int32(0) && !isempty(left_buf)
+            # Snapshot BOTH child subsets before any recursion. left_buf and
+            # right_buf are shared scratch — the left child's recursion
+            # reuses them for its own partitioning, clobbering right_buf and
+            # the r_copy we would otherwise take after the left recursion.
+            have_left  = lc != Int32(0) && !isempty(left_buf)
+            have_right = rc != Int32(0) && !isempty(right_buf)
+            if have_left && have_right
+                l_copy = copy(left_buf)
+                r_copy = copy(right_buf)
+                _batch_recurse!(ys, wrk, arr, arr[lc], d, xs, l_copy,
+                                 saved, left_buf, right_buf)
+                _batch_recurse!(ys, wrk, arr, arr[rc], d, xs, r_copy,
+                                 saved, left_buf, right_buf)
+            elseif have_left
                 l_copy = copy(left_buf)
                 _batch_recurse!(ys, wrk, arr, arr[lc], d, xs, l_copy,
                                  saved, left_buf, right_buf)
-            end
-            if rc != Int32(0) && !isempty(right_buf)
+            elseif have_right
                 r_copy = copy(right_buf)
                 _batch_recurse!(ys, wrk, arr, arr[rc], d, xs, r_copy,
                                  saved, left_buf, right_buf)
@@ -567,10 +580,11 @@ function _batch_recurse!(ys, wrk::Matrix{Float64},
         node.l[d] > 1 && break
     end
 
-    # Restore parent's wrk[dimshift, i] for sibling descents.
+    # Restore parent's wrk[dimshift, i] from this frame's stack slice and pop.
     @inbounds for (k, i) in pairs(subset)
-        wrk[dimshift, i] = saved[k]
+        wrk[dimshift, i] = saved[save_off + k]
     end
+    resize!(saved, save_off)
     return ys
 end
 
