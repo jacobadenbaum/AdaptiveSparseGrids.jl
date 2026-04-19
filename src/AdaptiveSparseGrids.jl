@@ -446,8 +446,10 @@ evaluate!(y, wrk, fun::AdaptiveSparseGrid, x)   = evaluate_recursive(y, wrk,    
     evaluate!(ys, fun, xs)
 
 Evaluate `fun` at each point in `xs` in parallel, writing `fun(xs[i])` to
-`ys[i]`. Traversal only reads from the grid, so it's safe to call across
-threads once `fun` has been trained.
+`ys[i]`. Traversal is read-only on the grid, so concurrent calls from
+multiple threads are safe. Do **not** call while the grid is being
+mutated (fit/refine) — `drive_to_college!` and `sync_eval!` write
+`fun.nodes` and `fun._eval`, which would race with the reading traversal.
 """
 function evaluate!(ys::AbstractVector, fun::AdaptiveSparseGrid,
                    xs::AbstractVector{<:Union{AbstractVector, Tuple}})
@@ -876,9 +878,15 @@ up-to-date eval view.
 function sync_eval!(fun::AdaptiveSparseGrid{N,K,L,T}) where {N,K,L,T}
     isempty(fun.nodes) && (empty!(fun._eval); empty!(fun._id); return fun)
 
+    # root(fun) = _eval[1] reads slot 1 unconditionally; sync relies on the
+    # root node being present in fun.nodes so slot 1 gets populated by the
+    # (idx, n) loop below. No public API deletes the root today, but guard
+    # the invariant explicitly.
+    root_idx = base(fun)
+    @assert haskey(fun.nodes, root_idx) "sync_eval!: root index missing from fun.nodes"
+
     # Assign stable positions: root → 1, then the rest in Dict order.
     empty!(fun._id); sizehint!(fun._id, length(fun.nodes))
-    root_idx = base(fun)
     fun._id[root_idx] = Int32(1)
     next::Int32 = 2
     for idx in keys(fun.nodes)
@@ -900,7 +908,9 @@ function sync_eval!(fun::AdaptiveSparseGrid{N,K,L,T}) where {N,K,L,T}
 end
 
 _eval_child_id(::Dict, ::Nothing) = Int32(0)
-_eval_child_id(id::Dict, n::Node) = Base.get(id, Index(n.l, n.i), Int32(0))
+# `n` came from the trusted tree, so skip Index's default validation (`check=false`):
+# avoids O(N·D) `m(lk)` calls across a full sync.
+_eval_child_id(id::Dict, n::Node) = Base.get(id, Index(n.l, n.i, false), Int32(0))
 
 """
 Update each new child's parent node(s) so that the parent's `children`

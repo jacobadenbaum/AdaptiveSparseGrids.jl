@@ -3,11 +3,13 @@ Small, reproducible benchmark used to track per-commit performance changes.
 Designed to be fast (~30s total) and deterministic so output can be pasted
 directly into commit messages.
 
-Reports: single-point eval time, bulk-eval throughput, nodes visited per call.
+Reports: single-point eval time, bulk serial + parallel throughput,
+nodes visited per call.
 
-Run:  julia --project=bench -t 1 bench/compare.jl
-(single thread on purpose — traversal is serial today, so threads just
- add noise. `construction` uses threads internally via Threads.@threads.)
+Run:  julia --project=bench -t auto bench/compare.jl
+(The bulk parallel column is only reported when nthreads > 1. Run with
+ -t 1 if you only want serial numbers. Single-point eval and bulk
+ serial throughput are unaffected by thread count.)
 =#
 
 using AdaptiveSparseGrids
