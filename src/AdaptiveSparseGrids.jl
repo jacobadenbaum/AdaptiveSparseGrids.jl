@@ -657,14 +657,6 @@ function evaluate_recursive(y, wrk, arr::Vector{EvalNode{D,K,T}},
     return y
 end
 
-@inline function childsplit(n::Node, x, d)
-    @inbounds nxd = n.x[d]
-    @inbounds xd  = x[d]
-    nxd > xd && return 1
-    nxd < xd && return 2
-    return 0
-end
-
 @inline function childsplit(n::EvalNode, x, d)
     @inbounds nxd = n.x[d]
     @inbounds xd  = x[d]

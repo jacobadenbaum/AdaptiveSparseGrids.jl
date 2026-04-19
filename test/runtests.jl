@@ -558,6 +558,38 @@ end
     end
 end
 
+@testset "sync_eval! invariants" begin
+    # Flat-eval view invariants. End-to-end correctness tests would catch
+    # any desync via wrong values, but direct assertions make regressions
+    # easier to diagnose.
+    import AdaptiveSparseGrids: base
+
+    g((x,y)) = sin(x) * cos(y)
+    fun = AdaptiveSparseGrid(g, [0.0, 0.0], [π, π],
+                             tol=1e-3, max_depth=10)
+
+    # length(_eval) == length(nodes), every Node index has a slot.
+    @test length(fun._eval) == length(fun.nodes)
+    @test all(haskey(fun._id, idx) for idx in keys(fun.nodes))
+    @test all(1 <= fun._id[idx] <= length(fun._eval) for idx in keys(fun.nodes))
+
+    # Slot 1 is the root.
+    root_idx = base(fun)
+    @test fun._id[root_idx] == Int32(1)
+    @test fun._eval[1].α == fun.nodes[root_idx].α
+    @test fun._eval[1].x == fun.nodes[root_idx].x
+
+    # Spot-check a sample of non-root nodes: their EvalNode mirrors the Node.
+    for idx in Iterators.take(keys(fun.nodes), 20)
+        ev = fun._eval[fun._id[idx]]
+        n  = fun.nodes[idx]
+        @test ev.α == n.α
+        @test ev.x == n.x
+        @test ev.l == n.l
+        @test ev.i == n.i
+    end
+end
+
 @testset "Partial Integration (multi-D)" begin
     # 1D `AdaptiveIntegral` has `dims == {1}`, so in `integrate_recursive!`
     # every dim is an integration dim (`dd = true`) and the `!dd` branch

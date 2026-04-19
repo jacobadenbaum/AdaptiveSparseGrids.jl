@@ -106,30 +106,30 @@ end
 
 # Count node visits for one call, using the same traversal logic as
 # evaluate_recursive. Only used for the "visits/call" column — not the hot path.
-using AdaptiveSparseGrids: Index, childsplit, leftchild, rightchild, base, scale, dims, ϕ
+using AdaptiveSparseGrids: childsplit, scale, ϕ
 
 function count_visits(fun, x)
     xs = scale(fun, x)
     c = Ref(0)
-    _visit!(c, fun, base(fun), 1, xs)
+    _visit!(c, fun._eval, fun._eval[1], 1, xs)
     return c[]
 end
 
-function _visit!(c, fun, idx, dimshift, x)
+function _visit!(c, arr, node, dimshift, x)
     c[] += 1
-    node = fun.nodes[idx]
+    D = length(node.l)
     u = 1.0
-    for d in 1:length(node.l); u *= ϕ(node, x, d); end
+    for d in 1:D; u *= ϕ(node, x, d); end
     u > 0 || return
-    for d in 1:length(node.l)
+    for d in 1:D
         kd = childsplit(node, x, d)
         if kd > 0
-            child = kd == 1 ? leftchild(idx, d) : rightchild(idx, d)
-            if haskey(fun.nodes, child)
-                _visit!(c, fun, child, d, x)
+            cid = kd == 1 ? node.left[d] : node.right[d]
+            if cid != Int32(0)
+                _visit!(c, arr, arr[cid], d, x)
             end
         end
-        if idx[1][d] > 1; break; end
+        node.l[d] > 1 && break
     end
     return
 end
