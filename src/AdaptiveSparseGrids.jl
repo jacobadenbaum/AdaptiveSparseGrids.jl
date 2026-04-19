@@ -471,32 +471,50 @@ function _bulk_evaluate!(ys, fun::AdaptiveSparseGrid, xs)
     return ys
 end
 
+# `nchunks` and `threaded` are internal knobs so tests can exercise the
+# chunk-boundary logic and the Threads.@threads path independently of the
+# Julia process's nthreads setting. Defaults preserve the public behavior
+# (chunk into `Threads.nthreads()` partitions and dispatch via @threads).
 function _bulk_evaluate_batched!(ys, fun::AdaptiveSparseGrid{N,1,L,T},
-                                  xs) where {N,L,T}
+                                  xs;
+                                  nchunks::Int = max(1, Threads.nthreads()),
+                                  threaded::Bool = true) where {N,L,T}
     M = length(xs)
     M == 0 && return ys
     fill!(ys, zero(eltype(ys)))
 
-    nth = max(1, Threads.nthreads())
-    chunk = cld(M, nth)
+    nch = max(1, nchunks)
+    chunk = cld(M, nch)
 
-    Threads.@threads for t in 1:nth
-        lo = (t-1)*chunk + 1
-        hi = min(M, t*chunk)
-        lo > hi && continue
-        L_chunk = hi - lo + 1
-        xs_scaled = [scale(fun, xs[i]) for i in lo:hi]
-        wrk       = ones(Float64, N, L_chunk)
-        subset    = collect(Int32(1):Int32(L_chunk))
-        saved     = Float64[]
-        left_buf  = Int32[]
-        right_buf = Int32[]
-        vys       = view(ys, lo:hi)
-        @inbounds _batch_recurse!(vys, wrk, fun._eval, fun._eval[1],
-                                   1, xs_scaled, subset,
-                                   saved, left_buf, right_buf)
+    if threaded
+        Threads.@threads for t in 1:nch
+            _bulk_batched_chunk!(ys, fun, xs, t, chunk, M)
+        end
+    else
+        for t in 1:nch
+            _bulk_batched_chunk!(ys, fun, xs, t, chunk, M)
+        end
     end
     return ys
+end
+
+function _bulk_batched_chunk!(ys, fun::AdaptiveSparseGrid{N,1,L,T}, xs,
+                               t::Int, chunk::Int, M::Int) where {N,L,T}
+    lo = (t-1)*chunk + 1
+    hi = min(M, t*chunk)
+    lo > hi && return nothing
+    L_chunk = hi - lo + 1
+    xs_scaled = [scale(fun, xs[i]) for i in lo:hi]
+    wrk       = ones(Float64, N, L_chunk)
+    subset    = collect(Int32(1):Int32(L_chunk))
+    saved     = Float64[]
+    left_buf  = Int32[]
+    right_buf = Int32[]
+    vys       = view(ys, lo:hi)
+    @inbounds _batch_recurse!(vys, wrk, fun._eval, fun._eval[1],
+                               1, xs_scaled, subset,
+                               saved, left_buf, right_buf)
+    return nothing
 end
 
 # In-place batch recursion. `subset` holds 1-based Int32 indices into `xs`

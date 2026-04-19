@@ -409,6 +409,31 @@ end
         @test maximum(abs, ys .- expected) < rtol
     end
 
+    @testset "Chunking invariance" begin
+        # Correctness of the batched bulk path must be independent of how we
+        # partition the point cloud into chunks and of whether we dispatch
+        # those chunks through Threads.@threads or a serial loop. This test
+        # exercises the chunking logic deterministically even when CI runs
+        # under a single thread (the default), which would otherwise make
+        # the chunk-boundary branches unreachable.
+        import AdaptiveSparseGrids: _bulk_evaluate_batched!
+        g((x,y)) = exp(-(x^2 + y^2))
+        fun = AdaptiveSparseGrid(g, [-1.0, -1.0], [1.0, 1.0],
+                                 tol=1e-3, max_depth=10)
+        rng = MersenneTwister(20260419)
+        pts = [(-1 + 2*rand(rng), -1 + 2*rand(rng)) for _ in 1:150]
+        expected = [fun(p) for p in pts]
+
+        # nchunks=1: no chunking. nchunks=3,7: typical multi-chunk.
+        # nchunks=200 > length(pts): exercises the lo > hi empty-chunk branch.
+        for nchunks in (1, 3, 7, 200), threaded in (false, true)
+            ys = zeros(length(pts))
+            _bulk_evaluate_batched!(ys, fun, pts;
+                                     nchunks = nchunks, threaded = threaded)
+            @test maximum(abs, ys .- expected) < rtol
+        end
+    end
+
     @testset "Multi-codomain matches per-point" begin
         # K > 1 uses the point-parallel fallback path but should still agree
         # with per-point evaluation.
